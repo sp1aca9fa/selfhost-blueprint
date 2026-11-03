@@ -21,16 +21,19 @@ only for a real exception, and say why in the profile.
 
 ## Roles and defaults
 
+The loop itself (tiers, Tier 3, questions, the owner's actions file, the setup review) is in
+`commands/ship.md`, the one copy every project follows.
+
 The model and effort in each agent's frontmatter are defaults. The profile's "Models and
 efforts" table overrides them per project; the orchestrator passes the table's values as `model`
-and `effort` when it starts an agent (the profile asks for this explicitly).
+and `effort` when it starts an agent, and never goes below them.
 
 | Agent | Default | For |
 |---|---|---|
-| builder | Sonnet, medium | routine chunks: glue, texts, docs, tests, UI without risky logic |
-| builder-heavy | Opus, high | trust territory, design, an ambiguous spec, after the builder failed |
+| builder | Sonnet, medium | Tier 1 chunks: glue, texts, docs, tests, UI without risky logic |
+| builder-heavy | Opus, high | Tier 2 and 3, design, an ambiguous spec, after the builder failed; Tier 3 plans |
 | code-reviewer-light | Sonnet, medium | Tier 1 review |
-| code-reviewer | Opus, high | Tier 2 review |
+| code-reviewer | Opus, high | Tier 2 review; Tier 3 plan, normal and adversarial reviews |
 | ux-reviewer | Sonnet, medium | visible changes, from screenshots only |
 | trust-reviewer | Sonnet, medium | visible changes showing numbers, money or risk (projects that need it) |
 | triage | Opus, medium | merging two or more reviewers' findings |
@@ -41,29 +44,35 @@ holds the context, writes specs, judges findings and talks to the owner; a weake
 makes every agent worse. It does small changes itself, since an agent starts cold and re-reads
 the rules, the spec and the code.
 
-## Choosing per project
+## Choosing per project: the risk class
 
-Go heavier where a mistake is silent and lasting; lighter where it is visible or recomputed.
+Each profile names one risk class, chosen once when the project starts; the class fixes the
+table. Only the setup review (`commands/ship.md` section 7) changes it, with the owner's yes.
 
-- **Heavy** (Opus, high for builder-heavy and code-reviewer): append-only or hash-chained
-  records, money and tax, signals people act on, anything that cannot be recomputed after a bug.
-- **Medium** (Opus, medium): derived values are recomputed from kept raw data, so a bug costs a
-  few wrong days. Keep `high` for auth and access (a leak between accounts cannot be recomputed
-  away).
-- **Light** (Sonnet for everything but the orchestrator): small tools, no user data, no money.
-- Not Haiku for code review: review needs reasoning across files. Haiku only for mechanical
-  summaries.
+- **A, silent and lasting**: money or tax, append-only or hash-chained records, signals people
+  act on; a bug cannot be recomputed away.
+- **B, recomputable**: derived values are rebuilt from kept raw data, so a bug costs a few wrong
+  days; user accounts or access may still exist.
+- **C, low stakes**: small tools, no user data, no money.
+
+| Role | A | B | C |
+|---|---|---|---|
+| builder | Sonnet medium | Sonnet medium | Sonnet medium |
+| builder-heavy | Opus high | Opus medium (high for auth and access) | Sonnet high |
+| code-reviewer-light | Sonnet medium | Sonnet medium | Sonnet medium |
+| code-reviewer | Opus high | Opus medium (high for auth and access) | Sonnet high |
+| Tier 3: builder-heavy, code-reviewer | Opus xhigh | Opus xhigh | Opus high |
+| ux-reviewer, trust-reviewer | Sonnet medium | Sonnet medium | Sonnet medium |
+| triage | Opus medium | Opus medium | Sonnet medium |
+| summarizer | Haiku low | Haiku low | Haiku low |
+
+Why:
+- Opus where correctness depends on reasoning across files; Sonnet for contained work.
+- The higher effort where a miss is silent; `medium` where a miss shows up or is recomputed.
+- Auth and access at `high` in class B: a leak between accounts cannot be recomputed away.
+- Never Haiku for code or review; Haiku only for mechanical summaries.
+- `max` is not used by default (much more cost for little over `xhigh`); the owner may ask for it
+  on one run.
 - A trust reviewer only when pages show numbers people act on; otherwise the UX reviewer also
   asks the trust question (one run fewer per change).
-- Triage only when two or more reviewers ran and their areas overlap; otherwise the orchestrator
-  triages.
-
-## Revisiting
-
-Every reviewer run is one row in the project's private ledger
-(`date,slug,tier,reviewer,findings,accepted,rejected,duplicate`). Every 10 runs of a kind the
-orchestrator reads it: a reviewer is noisy when over 70% of its findings were rejected in its last
-4 runs, redundant when it had no accepted finding in its last 3 runs (or each was also found by
-another reviewer). Noisy or redundant: propose going lighter. A bug a light review let through:
-propose going heavier. Changes go to the profile's table, not to these files, unless the lesson
-holds for every project.
+- Triage only when two or more reviewers ran; otherwise the orchestrator triages.

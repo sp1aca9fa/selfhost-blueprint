@@ -14,7 +14,7 @@ myapp/
   docs/
     requirements/           00-index.md (status table), area files, stages/, 14-decisions-log.md
     agents.md               the agent profile (for the shared agents)
-    spec-template.md        the form for every Tier 1 and 2 change
+    spec-template.md        the form for every Tier 1-3 change
     ux-review.md            instructions for the UX reviewer (who they are, what to look for)
     trust-review.md         only when pages show numbers people act on
     setup.md, running.md, backups.md, home-server.md, plugins.md, languages.md, ...
@@ -44,6 +44,7 @@ private/
     actions.md              only what waits on the owner (steps, checks, decisions, comments, work log)
     actions-done.md         what the owner finished or decided, newest first
     agent-ledger.csv        one row per reviewer run
+    run-ledger.csv          one row per task (tiers, retries, owner stops, escapes)
     server-output/          output the owner pasted from the server, for Claude to read
     *.sh                    personal scripts
   docs/                     private docs that are more than notes

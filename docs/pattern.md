@@ -64,6 +64,6 @@ database. It also proves every backup can be opened.
 
 ## Agents build, the owner decides
 
-Claude Code works through a fixed loop (spec, build, checks, tiered review, triage, commit, log)
+Claude Code works through a fixed loop (spec, build, checks, tiered review, triage, commit, log; `claude/commands/ship.md`)
 with shared agents. It stops and asks only for what is the owner's to decide. See
 [claude-setup.md](claude-setup.md).

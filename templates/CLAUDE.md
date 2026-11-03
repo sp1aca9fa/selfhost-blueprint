@@ -43,6 +43,9 @@ reader, with a recommendation), D. comments to know, F. work log since their las
 - Update it after every piece of work (new steps, decisions, the work log).
 - It holds only open items: what the owner marks `[x]`, settled decisions and read comments move
   to `private/ops/actions-done.md` (newest first, dated); the work log moves there once read.
+- Each item is 5-20 lines and enough to decide on alone, without asking and without other docs:
+  the context, every term explained, what happens now and if nothing is done, the options with
+  their risks, the recommendation, exactly what to do or answer (`/ship` section 6).
 - Claude's own to-dos and later work go in `private/ops/notes.md` ("To-dos"), also read every
   session.
 
@@ -83,50 +86,21 @@ files may be partial. Code, comments, database values, docs and commits in US En
 - CI gates: lint, typecheck, tests, build, `pnpm docs:check`.
 
 ## Agents (the main session orchestrates)
-Agents are shared across projects (the `selfhost-blueprint` repo's `claude/agents`, linked into
-`~/.claude`); this project's profile is `docs/agents.md` (the app, trust territory, domain
-checklist, and the model and effort per role: pass those as `model` and `effort` every time an
-agent is started). `/ship <task>` runs the whole loop. The main session plans, writes the spec,
-routes, triages and commits; it implements small changes itself (a few files in one area, a
-review fix, docs). Subagents cannot spawn subagents.
+The loop is the shared `/ship` (`~/.claude/commands/ship.md`, from the `selfhost-blueprint`
+repo): tiers 0-3 decided by the changed files, Tier 3 handling, which questions may stop the work,
+how to write for the owner, the setup review. Read it before any Tier 1-3 work, with or without
+`/ship`. This project's profile is `docs/agents.md`: risk class, trust-territory paths, the model
+and effort per role (pass them as `model` and `effort` every time an agent is started), the
+owner's list, standing rules. The main session plans, writes the spec, routes, triages and
+commits; it implements small changes itself (a few files in one area, a review fix, docs).
+Subagents cannot spawn subagents.
 
-**Tiers** (judge by the diff; trust territory decides the whole change):
 | Tier | When | Review |
 |---|---|---|
-| 0 | Docs, comments, config with no behavior change, test-only changes | None; CHECKS only |
-| 1 | Product code outside trust territory | `code-reviewer-light`; `ux-reviewer` if UI |
-| 2 | Trust territory (`docs/agents.md`); any new page | `code-reviewer`; `ux-reviewer` (and `trust-reviewer` if used) if UI |
-
-A Tier 0 or 1 change that fails CHECKS twice moves up a tier. Never review Tier 0 "to be safe".
-
-**Loop:**
-1. Spec in `.agent-runs/<date>-<slug>/spec.md` (`docs/spec-template.md`): goal, acceptance
-   criteria, the requirement sections it rests on (point, don't copy), pages touched, tier.
-   Unclear current-stage details: the conservative reading, under "Assumed". Unclear later-stage
-   details: left out and put to the owner.
-2. Build: `builder` for routine chunks, `builder-heavy` for trust territory, design, an
-   ambiguous spec, or after a builder failed. Give the spec path, the chunk and CHECKS; never
-   paste code.
-3. Gates: CHECKS (`pnpm check:all`); on failure back to the builder, at most 2 tries. UI: the
-   page crawler once for the changed pages.
-4. Review: the tier's reviewers in one message (parallel). Code reviewers get the commit range,
-   spec path and CHECKS output. UX and trust reviewers get only screenshot paths and one line per
-   page, nothing else.
-5. Triage: the main session verifies a single reviewer's findings against the code itself;
-   `triage` only when two or more reviewers ran. Act without asking: fix what is right, take the
-   recommended option on cosmetic asks, skip what is wrong; anything under "Owner decides" goes
-   to the owner. Fixes in one batch. Re-review only Tier 2 logic fixes, by the reviewer whose
-   finding it was. At most 2 fix rounds; what is still open goes in the report.
-6. Log facts in `.agent-runs/<date>-<slug>/log.md` and one row per reviewer run in
-   `private/ops/agent-ledger.csv` (`date,slug,tier,reviewer,findings,accepted,rejected,duplicate`).
-   Update `private/ops/actions.md`.
-7. `summarizer` for long logs, check output, crawl reports or pasted server output.
-
-**Stop and ask** only for: a destructive or irreversible action; pushing or deploying; a new
-dependency, external service or cost; a request that conflicts with the requirements; anything
-under "Owner decides" in `docs/agents.md`; two failed fix rounds on a bug. When the owner asked
-for continuous work, prepare the decision in `private/ops/actions.md` section C with a
-recommendation and continue with other work.
+| 0 | Docs, comments, tests only, config with no behavior change | None; CHECKS only |
+| 1 | Behavior changes outside trust territory | `code-reviewer-light`; `ux-reviewer` if visible |
+| 2 | A file on the trust-territory paths; any new page | `code-reviewer`; `ux-reviewer`, `trust-reviewer` if visible |
+| 3 | Tier 2 the normal loop cannot verify (`/ship` section 1 triggers) | plan review, then normal and adversarial review |
 
 ## Communication
 The report after each task, short, no step recap:

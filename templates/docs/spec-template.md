@@ -22,4 +22,4 @@
 <filled in when the spec was ambiguous>
 
 ## Tier
-<0, 1 or 2, with a one-line reason>
+<0, 1, 2 or 3, with the file or Tier 3 trigger that decided it>

@@ -19,6 +19,12 @@ Read first (skip what is already in your context):
 
 Inputs: a spec path, the chunk to do, the CHECKS command.
 
+`Mode: plan` (Tier 3, named in the prompt): write `plan.md` in the spec's folder before any code,
+then stop. It holds: the change; each way it could fail silently; how each irreversible step is
+undone; how it is rehearsed on a copy (synthetic data or a backup copy) and the expected output.
+Building from an approved plan: follow it, run the rehearsal, and report its output next to the
+expected one.
+
 Rules:
 - Follow the profile's domain rules. For math or data logic: state the rule in a code comment or
   the docs, with its source in the requirements. Handle missing data, empty input, one data

@@ -28,47 +28,41 @@ spec template, run logs, ledger and actions file. Why and how to choose models:
 
 ## The loop (`/ship <task>`)
 
-1. **Spec** (Tier 1 and 2) in `.agent-runs/<date>-<slug>/spec.md`: goal, acceptance criteria, the
-   requirement sections it rests on (pointed to, not copied), pages touched, tier, "Assumed".
-2. **Build**: `builder` for routine chunks, `builder-heavy` for trust territory. Small changes
-   the orchestrator may do itself (each project's `CLAUDE.md` says how small).
-3. **Gates**: CHECKS; the page crawler for visible changes (phone, wide, dark, each language).
-4. **Review by tier**, reviewers in parallel, each with only its allowed inputs (code reviewers:
-   commit range, spec, CHECKS output; UX and trust reviewers: screenshots and one line per page).
-5. **Triage**: the orchestrator alone with one reviewer, `triage` with two or more. Act without
-   asking: fix what is right, take the recommended option on cosmetic asks, skip what is wrong;
-   anything the owner decides goes to them. Fixes in one batch; re-review only Tier 2 logic
-   fixes; at most 2 rounds.
-6. **Commit** files by name (never `git add -A`); the owner pushes. Run log in `.agent-runs/`,
-   one ledger row per reviewer run, the owner's actions file updated.
+One copy for every project: [claude/commands/ship.md](../claude/commands/ship.md), linked into
+`~/.claude/commands`. Projects point to it from their `CLAUDE.md` instead of repeating it, so a
+session loads it only when it does agent work. It holds:
 
-| Tier | When | Review |
-|---|---|---|
-| 0 | docs, comments, config with no behavior change, tests only | none; CHECKS only |
-| 1 | product code outside trust territory | code-reviewer-light (+ UX if visible) |
-| 2 | trust territory | code-reviewer (+ UX, trust if visible) |
-
-A Tier 0 or 1 change that fails CHECKS twice moves up a tier. Never review Tier 0 "to be safe".
-
-**Stop and ask** only for: destructive or irreversible actions, pushing or deploying, new
-dependencies (MIT, Apache 2.0, BSD, ISC only), external services or costs, conflicts with the
-requirements, the profile's "Owner decides" items, two failed fix rounds.
+- **Tiers 0-3**, decided by the changed files against the profile's trust-territory paths; the
+  highest wins, doubt goes up, the deciding file is logged.
+- **Tier 3**: the strongest automated layer before the owner, for what the normal loop cannot
+  verify (irreversible actions on real data, the safety net's own code, integrity formats,
+  changes across repos or the server, a Tier 2 bug open after 2 rounds): a reviewed plan, a
+  rehearsal on a copy, a second adversarial review, one different approach before the owner.
+- **Models and efforts** exactly from the profile's table (set once from the risk class,
+  [claude/README.md](../claude/README.md)).
+- **Questions sorted before asking**: facts are looked up, conventions and reversible choices
+  are taken and reported; only the profile's closed owner list and a few fixed items stop work,
+  and even those never block other work. Settled answers become standing rules.
+- **The loop steps**: spec, build, gates, review, triage, commit by name, logs.
+- **Writing for the owner**: each actions item 5-20 lines, enough to decide on alone.
+- **The setup review** every 10 tasks or every month: fixed triggers on both ledgers, proposals
+  with their numbers to the owner, changes recorded in the profile. The setup is fixed between
+  reviews, never frozen.
 
 ## The owner's files (private ops)
 
 The owner's single place for anything to do or decide is `actions.md`; Claude reads it at the
-start of every session and updates it after every piece of work (template rules: "The owner's
-actions file").
-
+start of every session and updates it after every piece of work.
 
 - `actions.md`: only what waits on the owner. A. steps to run (commands, where), B. checks in the
-  app, C. decisions needed, D. comments to know, F. work log since their last review. Each
-  decision: 10-20 lines for a non-technical reader (terms explained, what happens now, the
-  proposal, the risk either way, a recommendation). Commands mark every part to replace as
-  `<<IN_CAPITALS>>`, with a line before saying what to replace and where to find it.
+  app, C. decisions needed, D. comments to know, F. work log since their last review. Each item
+  5-20 lines, enough to decide on without asking or opening other docs (`/ship` section 6).
 - `actions-done.md`: what the owner marked done or decided, newest first, dated; the work log.
 - `notes.md`: the owner's setup, sources' quirks, Claude's own to-dos.
-- `agent-ledger.csv`: `date,slug,tier,reviewer,findings,accepted,rejected,duplicate`.
+- `agent-ledger.csv`: one row per reviewer run,
+  `date,slug,tier,reviewer,findings,accepted,rejected,duplicate`.
+- `run-ledger.csv`: one row per task,
+  `date,slug,tier,final_tier,builder_retries,checks_failures,fix_rounds,owner_stops,escape_of`.
 
 ## The report
 
