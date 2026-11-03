@@ -1,0 +1,23 @@
+# Optional: the web app and the scheduled jobs in containers (see Dockerfile). The jobs service
+# runs the hourly check in a loop; it is idempotent and catches up on missed days, like the
+# systemd timer on a server.
+services:
+  web:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - data:/data
+    restart: unless-stopped
+  jobs:
+    build: .
+    env_file: .env
+    volumes:
+      - data:/data
+    command: ["sh", "-c", "while true; do pnpm daily || true; sleep 3600; done"]
+    restart: unless-stopped
+    depends_on:
+      - web
+volumes:
+  data:

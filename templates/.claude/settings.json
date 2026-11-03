@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "deny": ["Read(./.env)", "Read(./.env.*)", "Edit(./.claude/**)", "Write(./.claude/**)"]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": [],
+    "network": {
+      "allowedDomains": [
+        "registry.npmjs.org",
+        "github.com",
+        "*.github.com",
+        "*.githubusercontent.com"
+      ],
+      "deniedDomains": []
+    },
+    "filesystem": {
+      "allowWrite": ["~/.cache", "~/.local/share/pnpm", "~/.npm"]
+    }
+  }
+}
