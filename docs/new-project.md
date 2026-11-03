@@ -22,6 +22,7 @@ mkdir -p ~/code/<<GROUP>> && cd ~/code/<<GROUP>>
 git init -b main <<APP>> && cd <<APP>>
 # The private repo (create it empty on GitHub first, private):
 git submodule add git@github.com:<<USER>>/<<APP>>-private.git private
+git config push.recurseSubmodules on-demand    # a plain `git push` pushes private/ first
 ```
 
 Copy the templates and rename:

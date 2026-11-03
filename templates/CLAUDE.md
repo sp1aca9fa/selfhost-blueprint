@@ -9,8 +9,8 @@ Generic rules for Claude Code, committed. The owner's private rules are in
 3. Read only the area files that stage file lists as relevant to the task.
 4. Read the full `REQUIREMENTS.md` only for the completion check at the end of a stage, or when
    the owner asks.
-5. When the private submodule is checked out: `private/ops/actions.md` (the owner may have
-   written answers into it).
+5. When the private submodule is checked out: `private/ops/actions.md` and the to-dos in
+   `private/ops/notes.md` (see "The owner's actions file").
 
 If a request conflicts with the requirements, point out the conflict and ask before proceeding.
 
@@ -30,8 +30,21 @@ If a request conflicts with the requirements, point out the conflict and ask bef
 - Requirement changes: edit the files in `docs/requirements/`, run `pnpm docs:build`, add a
   decisions-log entry. Never edit `REQUIREMENTS.md` directly.
 - Unsure about a provider's limits or terms: check its current docs and record the findings.
-- Never `git add -A`; add files by name. Commit when a piece of work is done and tested; the owner
-  pushes (private submodule first, then this repo).
+- Never `git add -A`; add files by name (so a commit holds only what was meant: never a stray
+  `.env`, data file, scratch output or another session's edits). Commit when a piece of work is
+  done and tested; the owner pushes (a plain `git push` pushes the private submodule first:
+  `push.recurseSubmodules=on-demand`).
+
+## The owner's actions file
+`private/ops/actions.md` is the one place the owner looks for anything they need to do or decide:
+A. steps to run, B. checks in the app, C. decisions needed (each restated for a non-technical
+reader, with a recommendation), D. comments to know, F. work log since their last review.
+- Read it at the start of every session: the owner may have written answers or marked items done.
+- Update it after every piece of work (new steps, decisions, the work log).
+- It holds only open items: what the owner marks `[x]`, settled decisions and read comments move
+  to `private/ops/actions-done.md` (newest first, dated); the work log moves there once read.
+- Claude's own to-dos and later work go in `private/ops/notes.md` ("To-dos"), also read every
+  session.
 
 ## Agnostic core (mandatory)
 - Nothing particular to one country, provider, shop, language or person is hardcoded in core. It

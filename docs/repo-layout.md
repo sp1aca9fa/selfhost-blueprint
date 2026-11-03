@@ -51,7 +51,12 @@ private/
 ```
 
 The submodule is named `private/` because it holds the owner's whole private operation, not only
-plug-ins. (Tora's is still `collectors/` and Saku's `plugins/`; see [alignment.md](alignment.md).)
+plug-ins.
+
+Pushing: each repo sets `git config push.recurseSubmodules on-demand`, so a plain `git push`
+pushes the private submodule's new commits first, then the main repo (the main repo's commit names
+a submodule commit the server must be able to fetch). If the submodule push fails, the main push
+stops too.
 
 ## Names
 

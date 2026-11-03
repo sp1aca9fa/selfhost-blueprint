@@ -20,7 +20,6 @@ everything, and Claude Code building and reviewing changes through a fixed loop 
 | [docs/home-server.md](docs/home-server.md) | The mini PC: box, Node, services, address, watch, backups, updates, shutdown |
 | [docs/main-pc.md](docs/main-pc.md) | The owner's main PC (Windows + WSL): backup copies, analysis copy, hidden tasks |
 | [docs/new-project.md](docs/new-project.md) | Starting a new project from this blueprint, step by step |
-| [docs/alignment.md](docs/alignment.md) | Where Tora and Saku still differ from this blueprint, and why |
 | [claude/](claude/README.md) | The shared agents and `/ship`, linked into `~/.claude` by `claude/install.sh` |
 | [templates/](templates/) | Files to copy into a new project (rename `myapp`, `MyApp`, `MYAPP`) |
 

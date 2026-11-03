@@ -56,6 +56,11 @@ requirements, the profile's "Owner decides" items, two failed fix rounds.
 
 ## The owner's files (private ops)
 
+The owner's single place for anything to do or decide is `actions.md`; Claude reads it at the
+start of every session and updates it after every piece of work (template rules: "The owner's
+actions file").
+
+
 - `actions.md`: only what waits on the owner. A. steps to run (commands, where), B. checks in the
   app, C. decisions needed, D. comments to know, F. work log since their last review. Each
   decision: 10-20 lines for a non-technical reader (terms explained, what happens now, the

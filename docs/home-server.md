@@ -96,8 +96,22 @@ that running, tells the admins, and does not retry that version until a newer pu
 uncommitted changes is not updated. The restart needs a sudoers rule allowing only
 `systemctl restart <<APP>>-app`.
 
-Push order matters: push the private submodule first, then the main repo (the main repo's commit
-names a submodule commit the server must be able to fetch).
+It updates only to a commit GitHub CI passed on (`ops/ci-status.sh <sha>` reads the commit's check
+runs; no token for a public repo), and to exactly that commit even when a later one arrived
+meanwhile. While CI runs, or when GitHub gives no usable answer (no network, an error, its rate
+limit), nothing changes and the next tick asks again, logging once per commit and status; after 24
+hours without an update (counted from the server's own commit, so newer pushes do not restart it; an update or a reported CI failure does)
+the admins are told once. A failed CI run is treated like a failed update, at once (not retried
+until a newer push, admins told with its own text, step `ci`; an alert no channel took is tried
+again at each check until sent). After a passing re-run of CI on that commit, run the script by hand
+or delete `~/.local/state/<<APP>>/update-failed`. A commit CI never runs on (`[skip ci]`,
+`paths-ignore`, a disabled workflow) is never installed automatically. The private submodule is not
+gated (CI does not check it out). By hand, the script prints the CI status as a warning and updates
+anyway. `<<APP>>_UPDATE_REQUIRE_CI=0` turns the gate off for a fork without CI. See `ci.md`.
+
+Push order matters (the main repo's commit names a submodule commit the server must be able to
+fetch), so each repo sets `git config push.recurseSubmodules on-demand`: a plain `git push` pushes
+the private submodule first.
 
 ## 8. Turning it off
 
