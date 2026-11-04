@@ -69,6 +69,7 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 | ux-reviewer | sonnet | medium | visible changes |
 | trust-reviewer | - | - | <used or not, and why> |
 | triage | - | - | <used when two or more reviewers ran, or not> |
+| challenger | opus | high | direction only, on request or at a stage's start |
 | summarizer | haiku | low | |
 
 ## Reviews used

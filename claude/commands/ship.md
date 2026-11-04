@@ -137,7 +137,8 @@ Done items, settled decisions and read comments move to the done file, newest fi
 
 Read both ledgers. Triggers:
 - A reviewer over 70% rejected in its last 4 runs (noisy), or with no accepted finding of its
-  own in its last 3 (redundant): propose going lighter or dropping it.
+  own in its last 3 (redundant): propose going lighter or dropping it. Not for the challenger
+  (section 8).
 - Any escape in trust territory: propose going heavier there (model, effort, or a checklist item).
 - More than 1 in 5 tasks with `final_tier` above `tier`: propose clearer tier examples or
   trust-territory paths.
@@ -147,3 +148,18 @@ Read both ledgers. Triggers:
 Each proposal goes into the actions file (section C) with its numbers. The setup changes only
 when the owner agrees; the profile's "Setup changes" records the date and the reason. A lesson
 that holds for every project goes to the blueprint.
+
+## 8. The challenger (direction, not code)
+
+Runs when the owner asks, and at most once at the start of a stage or phase; never per change. Two
+steps of one agent: start it with `Step: blind`, the goal and the constraints only (not the current
+design); when it returns, continue the same agent with `Step: compare` and the design to read. The
+main session judges the verdict: what changes direction or a requirement goes to the owner through
+the actions file, ideas to the backlog.
+
+Evaluation: one agent-ledger row per run, reviewer `challenger`: `findings` the approaches
+proposed; `accepted` 1 if the run changed a decision, or gave a new reason that settled one (a
+well-argued "stay the course" counts), else 0; `rejected` the rest. Its value is irregular, so the
+noisy and redundant triggers do not apply and time without a run says nothing. After every 6 runs,
+the setup review reports how many of them had `accepted` 1 and the main session's opinion; with none
+in 6 it asks the owner whether to keep it. It is never dropped or lightened without the owner.

@@ -13,7 +13,7 @@ the loop and its lessons (for example: restore probes with `git checkout`, never
 project changes only its profile.
 
 Context cost: every session, in every project, loads only each agent's one-line description
-(about 400 tokens for all eight). An agent's body loads only when it runs. A project that does not
+(about 450 tokens for all nine). An agent's body loads only when it runs. A project that does not
 use the loop has no `docs/agents.md`; `/ship` then stops at once.
 
 A project's own `.claude/agents/<name>.md` overrides the shared agent of the same name. Use that
@@ -37,6 +37,7 @@ and `effort` when it starts an agent, and never goes below them.
 | ux-reviewer | Sonnet, medium | visible changes, from screenshots only |
 | trust-reviewer | Sonnet, medium | visible changes showing numbers, money or risk (projects that need it) |
 | triage | Opus, medium | merging two or more reviewers' findings |
+| challenger | Opus, high | a second opinion on direction, on request or at a stage's start (`commands/ship.md` section 8) |
 | summarizer | Haiku, low | long logs, check or crawl output, pasted server output |
 
 The orchestrator is the main session, not an agent: Opus at high effort (the owner picks it). It
@@ -64,6 +65,7 @@ table. Only the setup review (`commands/ship.md` section 7) changes it, with the
 | Tier 3: builder-heavy, code-reviewer | Opus xhigh | Opus xhigh | Opus high |
 | ux-reviewer, trust-reviewer | Sonnet medium | Sonnet medium | Sonnet medium |
 | triage | Opus medium | Opus medium | Sonnet medium |
+| challenger | Opus high | Opus high | Sonnet high |
 | summarizer | Haiku low | Haiku low | Haiku low |
 
 Why:
@@ -76,3 +78,6 @@ Why:
 - A trust reviewer only when pages show numbers people act on; otherwise the UX reviewer also
   asks the trust question (one run fewer per change).
 - Triage only when two or more reviewers ran; otherwise the orchestrator triages.
+- The challenger does not follow the class's code-reviewer in class B: a wrong direction is not
+  recomputed away, and it runs rarely, so `high` costs little. `xhigh` adds little here: it needs
+  range, not checking.
