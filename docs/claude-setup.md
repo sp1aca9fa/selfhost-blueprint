@@ -10,7 +10,9 @@
   owner's machines and commands. `CLAUDE.local.md` (git-ignored) is one line importing it:
   `@private/ops/claude-rules.md`.
 - **Global preferences** (every project) are in `~/.claude/CLAUDE.md`: few tokens, no em dashes,
-  no emoji, and restating each item before commenting on it.
+  no emoji, restating each item before commenting on it, and reports that hold no actions: what
+  the owner must do or decide goes only in the actions file, and the report says whether there is
+  anything new there.
 - The global git ignore (`~/.gitignore_global`) lists only `CLAUDE.local.md`,
   `.claude/settings.local.json`, `.mcp.json` (it may hold keys) and tool scratch folders.
 
@@ -70,7 +72,7 @@ After each task, short, no step recap:
 ```
 Done: <what changed; tier and why>
 Tested: <checks and tests; what was not tested>
-Needs you: <decisions and blockers, each restated, with a recommendation; or nothing>
+Actions: <"New actions from this round are in <the actions file>." or "No new actions raised.">
 Open issues: <unresolved after 2 rounds, known limits; or none>
 Assumed: <assumptions about data, calculations, users (tax with the rule it rests on); or none>
 Backlog ideas: <or none>

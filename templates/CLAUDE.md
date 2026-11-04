@@ -107,7 +107,7 @@ The report after each task, short, no step recap:
 ```
 Done: <what changed; tier and why>
 Tested: <checks and tests; what was not tested>
-Needs you: <decisions and blockers, each restated, with a recommendation; or nothing>
+Actions: <"New actions from this round are in <the actions file>." or "No new actions raised.">
 Open issues: <unresolved after 2 rounds, known limits; or none>
 Assumed: <every assumption about data, calculations or users; or none>
 Backlog ideas: <or none>

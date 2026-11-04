@@ -80,8 +80,9 @@ Then:
 - The profile's "Standing rules" settle questions the owner already answered once; apply them,
   never ask again. When the owner settles a new kind of question, add it there.
 - Never block on the owner: an owner choice goes into the actions file (section C) with a
-  recommendation; the work goes on up to that point and with everything else. Questions go in
-  the final report, never mid-run.
+  recommendation; the work goes on up to that point and with everything else. Everything the
+  owner must do or decide goes only in the actions file, never in the report and never mid-run;
+  the report says only whether there is anything new there.
 - Prefer the route that needs no permission: add-only changes, a setting off by default, a
   dry-run mode, a rehearsal on a copy.
 - Steps on the owner's machines: one copy-paste block with the expected output; scripts check
