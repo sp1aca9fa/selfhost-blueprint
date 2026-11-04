@@ -26,6 +26,15 @@ set, so nothing in CI reaches live sources.
 - Tests are deterministic: no live network, no real clock races. A flaky test is a bug, fixed
   first (never retried until green, never skipped).
 - Never loosen a check to make CI pass; report the failure.
+- Claude checks the latest runs at the start of every session (`gh run list --limit 3`) and fixes
+  a red run first, unasked: it holds back the server's update, and the owner never has to watch
+  GitHub's emails.
+- A test never depends on today's date: data at a fixed day with code that reads the clock passes
+  for weeks, then fails on every run. Pin the clock in the test. To check a project, run its tests
+  with the clock shifted forward by a preload (`NODE_OPTIONS=--require <file>`).
+- `vitest run --testTimeout=60000`: CI machines are slower than the owner's, and heavy tests near
+  the 5 s default fail at random. The limit only catches a hung test; no test may use it to assert
+  speed.
 - The server's self-update waits for a green CI run on the new commit before updating
   (`templates/ops/ci-status.sh`, `home-server.md` section 7), so a push that breaks the tests or
   the build never reaches the server:

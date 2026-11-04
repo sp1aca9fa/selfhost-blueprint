@@ -4,6 +4,8 @@ Loaded every session through the main repo's `CLAUDE.local.md` (git-ignored; it 
 file). The generic rules are in the public `CLAUDE.md`; this file keeps only what is private.
 
 ## Where things are
+- At the start of every session read `private/ops/actions.md`, the To-dos in `private/ops/notes.md`,
+  and the latest CI runs (`gh run list --limit 3`): a red run on a pushed commit is fixed first.
 - The owner's setup, sources' quirks and to-dos: `private/ops/notes.md`.
 - The owner's checklist and open decisions: `private/ops/actions.md`, holding only what still needs
   the owner. Done steps, settled decisions and the work log: `private/ops/actions-done.md`.
