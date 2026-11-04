@@ -30,6 +30,17 @@ of normal work.
 Permission allow-lists the owner built up, MCP tool permissions, private domains. Array settings
 from both files are combined, so the local file only adds.
 
+## What it needs from a project
+
+Run the project's full checks once under it, in the first session after turning it on. Two things
+commonly fail:
+- While a command runs, the sandbox mounts empty stand-ins at names like `.bashrc`, `.gitconfig`,
+  `.idea`, `.vscode` and `.mcp.json` in the repo. A format check over `.` cannot open them, so list
+  them in `.prettierignore` (no trailing slash: they are not folders). `git status` may show them
+  inside the sandbox; never add them.
+- Writes outside the repo and `$TMPDIR` are refused. Tests use `os.tmpdir()`, never a literal
+  `/tmp`, and a test that clears a script's environment passes `TMPDIR` on.
+
 ## Limits
 
 - ssh to the home server is outside the baseline; the owner runs server commands and pastes the
