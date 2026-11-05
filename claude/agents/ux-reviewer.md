@@ -1,6 +1,6 @@
 ---
 name: ux-reviewer
-description: Fresh-eyes UX review of changed pages from screenshots only (phone, wide, dark, each install language), following the project's docs/ux-review.md. Never give it code, the spec or history.
+description: Fresh-eyes UX review of changed pages from screenshots only (phone, wide, half and full widescreen, dark, each install language), following the project's docs/ux-review.md. Never give it code, the spec or history.
 model: sonnet
 effort: medium
 tools: Read, Glob
