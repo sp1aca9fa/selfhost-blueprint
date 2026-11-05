@@ -4,7 +4,8 @@
 // "Process check". No dependencies: CI runs it from a bare checkout.
 //
 //   node ops/process-check.mjs <before> [<after>]   check before..after (after: HEAD by default)
-//   node ops/process-check.mjs --audit [<after>]    boundary..after: tasks never closed, counts
+//   node ops/process-check.mjs --audit [<after>]    boundary..after: tasks never closed, commits
+//                                                   that failed with no task to close, counts
 //
 // Exit 0: pass, or an audit. Exit 1: a rule failed, or the range cannot be trusted. Exit 2: usage.
 //
@@ -348,12 +349,22 @@ function readCommit(git, sha) {
 }
 
 // Read from the commit, not the working tree, so a dirty tree cannot change the verdict.
-function loadConfig(git, after) {
+function loadConfig(git, commit, label = CONFIG_PATH) {
   try {
-    return parseConfig(git(['show', `${after}:${CONFIG_PATH}`]));
+    return parseConfig(git(['show', `${commit}:${CONFIG_PATH}`]));
   } catch (error) {
-    throw new Error(`${CONFIG_PATH}: ${error.message}`);
+    throw new Error(`${label}: ${error.message}`);
   }
+}
+
+/**
+ * The rules from before this push, when there were any and the push changed them. A push must not
+ * be judged only by the rules it brings, or emptying a reviewer list would pass in the same push.
+ */
+function earlierConfig(git, before, after) {
+  if (before === null || !existsAt(git, before, CONFIG_PATH)) return null;
+  const [was, now] = [before, after].map((commit) => git(['show', `${commit}:${CONFIG_PATH}`]));
+  return was === now ? null : loadConfig(git, before, `${CONFIG_PATH} before this push`);
 }
 
 function isShallow(git) {
@@ -375,8 +386,9 @@ function runCheck(git, beforeArg, afterArg) {
 
   // Zeros: the first push of a repo, so the whole history up to the boundary is older.
   const exclude = [];
+  let before = null;
   if (!ALL_ZEROS.test(beforeArg)) {
-    const before = resolveCommit(git, beforeArg);
+    before = resolveCommit(git, beforeArg);
     if (before === null) return fail('range unknown: before not found');
     const ancestor = git(['merge-base', '--is-ancestor', before, after], { allowFail: true });
     if (ancestor === null) return fail('range unknown: before is not an ancestor of after');
@@ -384,6 +396,7 @@ function runCheck(git, beforeArg, afterArg) {
   }
 
   const config = loadConfig(git, after);
+  const earlier = earlierConfig(git, before, after);
   const boundary = findBoundary(git, after);
   if (boundary === null) return fail('range unknown: no commit added the config');
 
@@ -394,6 +407,14 @@ function runCheck(git, beforeArg, afterArg) {
 
   const { failures, notices, counts, tasks } = judgeCommits(commits, config);
   const problems = [...failures, ...tasks.flatMap((task) => taskProblems(task, config))];
+  if (earlier !== null) {
+    notices.push('notice this push changes the config: judged by both, a failure of either fails');
+    const old = judgeCommits(commits, earlier);
+    const oldProblems = [...old.failures, ...old.tasks.flatMap((t) => taskProblems(t, earlier))];
+    for (const line of oldProblems) {
+      if (!problems.includes(line)) problems.push(`${line} (by the config before this push)`);
+    }
+  }
   const summary = [
     `checked ${counts.checked}`,
     `older ${all.length - inScope.length}`,
@@ -410,7 +431,9 @@ function runCheck(git, beforeArg, afterArg) {
       ...problems,
       `fail: ${summary}`,
       'This run does not hold back a server. To fix: run the missing review, then commit under the',
-      'same Ship-Task with Ship-Reviews (docs/ci.md, "Process check").',
+      'same Ship-Task with Ship-Reviews. A commit with no Ship-Task has no task to close, and only a',
+      'history rewrite could add one: review it and log it; --audit lists it as unclaimed',
+      '(docs/ci.md, "Process check").',
     ],
   };
 }
@@ -428,14 +451,19 @@ function runAudit(git, afterArg) {
   const commits = revList(git, ['--no-merges', after, `^${boundary}`]).map((sha) =>
     readCommit(git, sha),
   );
-  const { counts, tasks } = judgeCommits(commits, config);
+  const { failures, counts, tasks } = judgeCommits(commits, config);
   const problems = tasks.map((task) => taskProblems(task, config));
   const open = problems.filter((list) => list.length > 0).length;
+  // Every failure line starts with its commit's short sha. These join no task, so without this line
+  // a trust commit with no trailers would be invisible here after its one red run.
+  const unclaimed = [...new Set(failures.map((line) => line.split(' ')[0]))];
   return {
     status: 0,
     lines: [
       ...problems.flat(),
-      `audit: tasks ${tasks.length}, open ${open}, why ${counts.why}, owner ${counts.owner}`,
+      ...(unclaimed.length > 0 ? [`unclaimed ${unclaimed.length}: ${unclaimed.join(' ')}`] : []),
+      `audit: tasks ${tasks.length}, open ${open}, unclaimed ${unclaimed.length}, ` +
+        `why ${counts.why}, owner ${counts.owner}`,
     ],
   };
 }

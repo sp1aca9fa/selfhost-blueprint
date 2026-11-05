@@ -1,1 +1,1 @@
-date,case,kind,reviewer,model,effort,tier,planted,caught,other_findings,batch,batch_cases,agent_text,malformed
+date,case,kind,reviewer,model,effort,tier,planted,caught,other_findings,batch,batch_cases,agent_text,malformed,context_text,case_hash

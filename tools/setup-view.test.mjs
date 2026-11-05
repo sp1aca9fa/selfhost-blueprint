@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -20,17 +21,21 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  agentTextHash,
   buildView,
+  caseHash,
+  contextHash,
   DEFAULT_AGENTS_DIR,
   DEFAULT_ROOT,
   DRILLED_REVIEWERS,
   findProjects,
+  hashParts,
   HEADERS,
   MIN_PLANTED,
   MIN_RUNS,
+  modelMatches,
   parseLedgerPaths,
   parseRiskClass,
+  profileModel,
   readLedger,
   renderView,
 } from './setup-view.mjs';
@@ -66,6 +71,15 @@ const profile = (cls = 'A (neutral): a made-up reason') => `# Agent profile
 ## Risk class
 
 ${cls}
+
+## Models and efforts
+
+| Role | Model | Effort | Note |
+|---|---|---|---|
+| code-reviewer-light | model-x | high | |
+| code-reviewer | model-x | high | |
+| other-reviewer | model-x | high | |
+| Tier 3: builder-heavy, code-reviewer | model-x | xhigh | |
 
 ## Paths
 
@@ -146,6 +160,8 @@ const drillRow = (over = {}) => {
     batch_cases: '1',
     agent_text: 'abc',
     malformed: '0',
+    context_text: 'ctx',
+    case_hash: 'chash',
     ...over,
   };
   return HEADERS.drill.new.map((c) => r[c]).join(',');
@@ -154,13 +170,31 @@ const drillRow = (over = {}) => {
 const view = (root, agents = agentsDir(root)) => buildView({ root, agentsDir: agents });
 const groupList = (groups) => [...groups.values()];
 
-function hashFor(dir, agents, reviewer) {
-  return agentTextHash([
-    readFileSync(join(agents, `${reviewer}.md`)),
+function hashFor(agents, reviewer) {
+  return hashParts([readFileSync(join(agents, `${reviewer}.md`))]);
+}
+
+// As the runner computes it. The global rules are empty here: the view runs under an empty HOME.
+function contextFor(dir, globalRules = '') {
+  return contextHash(
     readFileSync(join(dir, 'docs', 'agents.md')),
     readFileSync(join(dir, 'CLAUDE.md')),
-  ]);
+    globalRules,
+  );
 }
+
+function addCase(dir, id, over = {}) {
+  const caseDir = join(dir, 'vault', 'ops', 'drills', id);
+  write(
+    join(caseDir, 'case.json'),
+    JSON.stringify({ id, reviewer: 'code-reviewer', tier: 2, retired: null, ...over }),
+  );
+  write(join(caseDir, 'spec.md'), 'A made-up spec.\n');
+  return caseHash(caseDir);
+}
+
+// No real home: the view reads ~/.claude/CLAUDE.md, and a test must not depend on the machine's.
+process.env.HOME = join(scratch, 'empty-home');
 
 describe('finding projects', () => {
   it('reads one level only, so a template profile deeper down is not a project', () => {
@@ -673,152 +707,337 @@ describe('drill rows', () => {
   });
 });
 
-describe('no batch for current text', () => {
+describe('which batch speaks for a reviewer', () => {
   const textLine = (out, name) => out.split('\n').find((l) => l.startsWith(`  ${name}:`));
 
-  // Two passes: the project must exist before its hash can go in its own drill ledger.
-  function setup(makeRows, extra = {}) {
+  // The project and its cases must exist before their hashes can go in its own drill ledger. `row`
+  // is a row that counts: this text, this context, the case as it stands, the profile's settings.
+  function setup(makeRows, { cases = ['c01'], extra = {} } = {}) {
     const root = newRoot();
     const agents = agentsDir(root);
     const dir = addProject(root, 'alpha', extra);
-    const hash = hashFor(dir, agents, 'code-reviewer');
-    write(join(dir, 'vault', 'ops', 'drill-ledger.csv'), lines(DRILL, ...makeRows(hash)));
-    return { root, agents, dir, hash };
+    const hashes = Object.fromEntries(cases.map((id) => [id, addCase(dir, id)]));
+    const agentHash = hashFor(agents, 'code-reviewer');
+    const row = (over = {}) =>
+      drillRow({
+        agent_text: agentHash,
+        case_hash: hashes[over.case ?? 'c01'],
+        context_text: contextFor(dir),
+        batch_cases: String(Math.max(cases.length, 1)),
+        ...over,
+      });
+    write(join(dir, 'vault', 'ops', 'drill-ledger.csv'), lines(DRILL, ...makeRows(row, agentHash)));
+    return { root, agents, dir };
   }
   const outOf = ({ root, agents }) => renderView(buildView({ root, agentsDir: agents }));
+  const statusOf = (fixture, name = 'code-reviewer') =>
+    textLine(outOf(fixture), `alpha ${name}`).split(': ').slice(1).join(': ');
+  const NO_BATCH = 'no batch for current text';
+  const BLANK = { caught: '', other_findings: '', malformed: '' };
 
   it('flags both covered reviewers when the project has no drill ledger', () => {
     const root = newRoot();
     addProject(root, 'alpha');
     const out = renderView(view(root));
     for (const reviewer of DRILLED_REVIEWERS) {
-      assert.equal(textLine(out, `alpha ${reviewer}`), `  alpha ${reviewer}: no batch for current text`);
+      assert.equal(textLine(out, `alpha ${reviewer}`), `  alpha ${reviewer}: ${NO_BATCH}`);
     }
   });
 
   it('flags a header-only drill ledger: no row exists yet', () => {
-    const out = outOf(setup(() => []));
-    assert.match(textLine(out, 'alpha code-reviewer'), /no batch for current text/);
+    assert.equal(statusOf(setup(() => [])), NO_BATCH);
   });
 
-  it('is current when the latest scored batch has this text and is complete', () => {
-    const out = outOf(setup((hash) => [drillRow({ agent_text: hash })]));
-    assert.equal(textLine(out, 'alpha code-reviewer'), '  alpha code-reviewer: current, scored 1 of 1');
+  it('with no active case nothing is current, whatever the rows say', () => {
+    assert.equal(statusOf(setup((row) => [row({ case_hash: 'x' })], { cases: [] })), NO_BATCH);
   });
 
-  it('flags a reviewer whose text differs from its latest scored batch', () => {
-    const out = outOf(setup(() => [drillRow({ agent_text: 'stale' })]));
-    assert.match(textLine(out, 'alpha code-reviewer'), /no batch for current text/);
+  it('is current with a batch for this text, at the profile, covering every active case', () => {
+    assert.equal(statusOf(setup((row) => [row()])), 'current, scored 1 of 1');
+    const two = setup((row) => [row(), row({ case: 'c02' })], { cases: ['c01', 'c02'] });
+    assert.equal(statusOf(two), 'current, scored 2 of 2');
+  });
+
+  it('flags a reviewer whose text differs from every batch', () => {
+    assert.equal(statusOf(setup((row) => [row({ agent_text: 'stale' })])), NO_BATCH);
   });
 
   it('judges each reviewer on its own batch', () => {
-    const out = outOf(
-      setup((hash) => [
-        drillRow({ agent_text: hash }),
-        drillRow({ reviewer: 'code-reviewer-light', agent_text: hash, batch: 'batch-two' }),
-      ]),
-    );
-    assert.match(textLine(out, 'alpha code-reviewer'), /: current, scored/);
-    assert.match(textLine(out, 'alpha code-reviewer-light'), /no batch for current text/);
+    const fixture = setup((row, hash) => [
+      row(),
+      row({ reviewer: 'code-reviewer-light', agent_text: hash, batch: 'batch-two' }),
+    ]);
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+    assert.equal(statusOf(fixture, 'code-reviewer-light'), NO_BATCH);
   });
 
   it('a later batch of another reviewer does not change this reviewer', () => {
-    const out = outOf(
-      setup((hash) => [
-        drillRow({ agent_text: hash, batch: 'batch-one' }),
-        drillRow({ reviewer: 'code-reviewer-light', agent_text: 'other-text', batch: 'batch-two' }),
-      ]),
-    );
-    assert.match(textLine(out, 'alpha code-reviewer'), /: current, scored/);
-  });
-
-  it('compares with the latest batch only: an older batch with this text does not count', () => {
-    const out = outOf(
-      setup((hash) => [
-        drillRow({ agent_text: hash, batch: 'batch-one' }),
-        drillRow({ agent_text: 'newer-text', batch: 'batch-two' }),
-      ]),
-    );
-    assert.match(textLine(out, 'alpha code-reviewer'), /no batch for current text/);
-  });
-
-  it('skips unscored rows when finding the latest batch', () => {
-    const out = outOf(
-      setup((hash) => [
-        drillRow({ agent_text: hash, batch: 'batch-one' }),
-        drillRow({ agent_text: 'newer-text', batch: 'batch-two', caught: '', other_findings: '', malformed: '' }),
-      ]),
-    );
-    assert.match(textLine(out, 'alpha code-reviewer'), /: current, scored/);
-  });
-
-  it('flags a reviewer whose rows are all unscored', () => {
-    const out = outOf(
-      setup((hash) => [drillRow({ agent_text: hash, caught: '', other_findings: '', malformed: '' })]),
-    );
-    assert.match(textLine(out, 'alpha code-reviewer'), /no batch for current text/);
-  });
-
-  it('a malformed row does not count as a scored batch', () => {
-    const out = outOf(setup((hash) => [drillRow({ agent_text: hash, caught: 'x' })]));
-    assert.match(textLine(out, 'alpha code-reviewer'), /no batch for current text/);
-  });
-
-  it('says a batch that died midway is incomplete, across the whole batch', () => {
-    const out = outOf(
-      setup((hash) => [
-        drillRow({ agent_text: hash, batch_cases: '3', case: 'c01' }),
-        drillRow({ agent_text: hash, batch_cases: '3', case: 'c02', caught: '', other_findings: '', malformed: '' }),
-      ]),
-    );
-    assert.equal(textLine(out, 'alpha code-reviewer'), '  alpha code-reviewer: batch incomplete, scored 1 of 3');
-  });
-
-  it('a case scored twice does not fill a batch', () => {
-    const out = outOf(
-      setup((hash) => [
-        drillRow({ agent_text: hash, batch_cases: '2', case: 'c01' }),
-        drillRow({ agent_text: hash, batch_cases: '2', case: 'c01' }),
-      ]),
-    );
-    assert.match(textLine(out, 'alpha code-reviewer'), /batch incomplete, scored 1 of 2/);
-  });
-
-  it('counts both reviewers of one batch against its planned cases', () => {
-    const fixture = setup((hash) => [
-      drillRow({ agent_text: hash, batch_cases: '2', case: 'c01' }),
-      drillRow({ agent_text: hash, batch_cases: '2', case: 'c02', reviewer: 'code-reviewer-light' }),
+    const fixture = setup((row) => [
+      row({ batch: 'batch-one' }),
+      row({ reviewer: 'code-reviewer-light', agent_text: 'other-text', batch: 'batch-two' }),
     ]);
-    assert.match(textLine(outOf(fixture), 'alpha code-reviewer'), /current, scored 2 of 2/);
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
   });
 
-  for (const [what, edit] of [
-    ['the agent file', ({ agents }) => write(join(agents, 'code-reviewer.md'), 'edited\n')],
-    ['the profile', ({ dir }) => write(join(dir, 'docs', 'agents.md'), `${profile()}\nedited\n`)],
-    ['CLAUDE.md', ({ dir }) => write(join(dir, 'CLAUDE.md'), 'edited\n')],
+  for (const [what, over] of [
+    ['another model', { model: 'model-y-1' }],
+    ['another effort', { effort: 'low' }],
+    ['a draft text', { agent_text: 'draft-text' }],
+    ['a case hash of another time', { case_hash: 'older' }],
+    ['no case hash', { case_hash: '' }],
   ]) {
-    it(`an edit to ${what} flags the reviewer`, () => {
-      const fixture = setup((hash) => [drillRow({ agent_text: hash })]);
-      assert.match(textLine(outOf(fixture), 'alpha code-reviewer'), /: current, scored/);
-      edit(fixture);
-      assert.match(textLine(outOf(fixture), 'alpha code-reviewer'), /no batch for current text/);
+    it(`a later comparison batch with ${what} is ignored: it cannot reopen anything`, () => {
+      const fixture = setup((row) => [row({ batch: 'batch-one' }), row({ batch: 'later', ...over })]);
+      assert.equal(statusOf(fixture), 'current, scored 1 of 1');
     });
   }
 
-  it('flags when a text cannot be read: no known hash is no match', () => {
-    const fixture = setup((hash) => [drillRow({ agent_text: hash })]);
-    rmSync(join(fixture.dir, 'CLAUDE.md'));
-    assert.match(textLine(outOf(fixture), 'alpha code-reviewer'), /no batch for current text/);
+  it('only another model, or only another effort, is no batch', () => {
+    assert.equal(statusOf(setup((row) => [row({ model: 'model-y-1' })])), NO_BATCH);
+    assert.equal(statusOf(setup((row) => [row({ effort: 'low' })])), NO_BATCH);
+  });
+
+  it('a change to the role row in the profile needs a new batch', () => {
+    for (const edit of [
+      (text) => text.replace('| code-reviewer | model-x | high |', '| code-reviewer | model-y | high |'),
+      (text) => text.replace('| code-reviewer | model-x | high |', '| code-reviewer | model-x | low |'),
+    ]) {
+      const fixture = setup((row) => [row()]);
+      assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+      const file = join(fixture.dir, 'docs', 'agents.md');
+      write(file, edit(readFileSync(file, 'utf8')));
+      assert.equal(statusOf(fixture), NO_BATCH);
+    }
+  });
+
+  it('reads the tier 3 row for a tier 3 row in the ledger, by its reviewer', () => {
+    const tier3 = setup((row) => [row({ tier: '3', effort: 'xhigh' })]);
+    assert.equal(statusOf(tier3), 'current, scored 1 of 1');
+    const roleRow = setup((row) => [row({ tier: '3', effort: 'high' })]);
+    assert.equal(statusOf(roleRow), NO_BATCH);
+    const tier2 = setup((row) => [row({ tier: '2', effort: 'xhigh' })]);
+    assert.equal(statusOf(tier2), NO_BATCH);
+  });
+
+  it('a reviewer the tier 3 row does not list keeps its role row', () => {
+    const profileText = profile();
+    assert.deepEqual(profileModel(profileText, 'code-reviewer', 3), { model: 'model-x', effort: 'xhigh' });
+    assert.deepEqual(profileModel(profileText, 'code-reviewer', 2), { model: 'model-x', effort: 'high' });
+    assert.deepEqual(profileModel(profileText, 'code-reviewer-light', 3), { model: 'model-x', effort: 'high' });
+    assert.equal(profileModel(profileText, 'absent', 3), null);
+    assert.equal(profileModel(profileText, 'builder', 2), null);
+  });
+
+  it('a model id matches its alias or a longer id, and nothing else', () => {
+    assert.equal(modelMatches('claude-opus-9-9', 'opus'), true);
+    assert.equal(modelMatches('claude-opus-9-9-20300101', 'claude-opus-9-9'), true);
+    assert.equal(modelMatches('claude-opus-9-9', 'sonnet'), false);
+    assert.equal(modelMatches('claude-opus-9-10', 'claude-opus-9-1'), false);
+  });
+
+  it('skips unscored rows when finding the batch', () => {
+    const fixture = setup((row) => [
+      row({ batch: 'batch-one' }),
+      row({ batch: 'batch-two', ...BLANK }),
+    ]);
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+  });
+
+  it('flags a reviewer whose rows are all unscored', () => {
+    assert.equal(statusOf(setup((row) => [row(BLANK)])), NO_BATCH);
+  });
+
+  it('a malformed row does not count as a scored batch', () => {
+    assert.equal(statusOf(setup((row) => [row({ caught: 'x' })])), NO_BATCH);
+  });
+
+  it('says a batch that died midway is incomplete, against the active cases', () => {
+    const fixture = setup(
+      (row) => [row({ batch_cases: '3' }), row({ batch_cases: '3', case: 'c02', ...BLANK })],
+      { cases: ['c01', 'c02', 'c03'] },
+    );
+    assert.equal(statusOf(fixture), 'batch incomplete, scored 1 of 3');
+  });
+
+  it('a case scored twice does not fill a batch', () => {
+    const fixture = setup((row) => [row({ batch_cases: '2' }), row({ batch_cases: '2' })], {
+      cases: ['c01', 'c02'],
+    });
+    assert.equal(statusOf(fixture), 'batch incomplete, scored 1 of 2');
+  });
+
+  it('a --case run, batch_cases 1, cannot make a reviewer of two cases current', () => {
+    const fixture = setup((row) => [row({ batch_cases: '1' })], { cases: ['c01', 'c02'] });
+    assert.equal(statusOf(fixture), 'batch incomplete, scored 1 of 2');
+    const afterFull = setup(
+      (row) => [row(), row({ case: 'c02' }), row({ batch: 'one-case', batch_cases: '1' })],
+      { cases: ['c01', 'c02'] },
+    );
+    assert.equal(statusOf(afterFull), 'current, scored 2 of 2');
+  });
+
+  it('two --case runs under one batch name do not add up to a batch', () => {
+    const fixture = setup(
+      (row) => [row({ batch_cases: '1' }), row({ case: 'c02', batch_cases: '1' })],
+      { cases: ['c01', 'c02'] },
+    );
+    assert.equal(statusOf(fixture), 'batch incomplete, scored 2 of 2');
+    // A row with no number there is malformed before it gets this far.
+    assert.equal(statusOf(setup((row) => [row({ batch_cases: '' })])), NO_BATCH);
+  });
+
+  it('a --case run is a whole batch for a reviewer with that one case', () => {
+    assert.equal(statusOf(setup((row) => [row({ batch_cases: '1' })])), 'current, scored 1 of 1');
+  });
+
+  it('the latest batch speaks, in both directions', () => {
+    // Two whole batches: the context line reads from the later one.
+    const fixture = setup((row) => [
+      row({ batch: 'older', date: '2026-01-01', context_text: 'context-then' }),
+      row({ batch: 'newer', date: '2026-02-02' }),
+    ]);
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+    assert.ok(!outOf(fixture).includes('context changed'));
+    const reversed = setup((row) => [
+      row({ batch: 'older', date: '2026-01-01' }),
+      row({ batch: 'newer', date: '2026-02-02', context_text: 'context-then' }),
+    ]);
+    assert.ok(outOf(reversed).includes('context changed since the batch of 2026-02-02'));
+    // No whole batch: the count is the later one's.
+    const partial = setup(
+      (row) => [
+        row({ batch: 'older', case: 'c01' }),
+        row({ batch: 'newer', case: 'c01' }),
+        row({ batch: 'newer', case: 'c02' }),
+      ],
+      { cases: ['c01', 'c02', 'c03'] },
+    );
+    assert.equal(statusOf(partial), 'batch incomplete, scored 2 of 3');
+  });
+
+  it("a row with this reviewer's text under another reviewer's name does not count", () => {
+    assert.equal(statusOf(setup((row) => [row({ reviewer: 'code-reviewer-light' })])), NO_BATCH);
+  });
+
+  it('each reviewer is judged on its own cases, whatever else the batch planned', () => {
+    const fixture = setup(
+      (row) => [row({ batch_cases: '2' }), row({ batch_cases: '2', case: 'c02', reviewer: 'code-reviewer-light' })],
+      { cases: ['c01'] },
+    );
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+  });
+
+  it('a retired case is not needed; a new or changed case reopens it', () => {
+    const fixture = setup((row) => [row()], { cases: ['c01'] });
+    addCase(fixture.dir, 'gone', { retired: '2026-01-01' });
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+    addCase(fixture.dir, 'c02');
+    assert.equal(statusOf(fixture), 'batch incomplete, scored 1 of 2');
+
+    const changed = setup((row) => [row()], { cases: ['c01'] });
+    write(join(changed.dir, 'vault', 'ops', 'drills', 'c01', 'spec.md'), 'Reworded.\n');
+    assert.equal(statusOf(changed), 'batch incomplete, scored 0 of 1');
+  });
+
+  it('a change to any of the case files changes its hash', () => {
+    for (const file of ['case.json', 'spec.md', 'planted.patch']) {
+      const fixture = setup((row) => [row()], { cases: ['c01'] });
+      assert.equal(statusOf(fixture), 'current, scored 1 of 1', file);
+      const path = join(fixture.dir, 'vault', 'ops', 'drills', 'c01', file);
+      // Still valid JSON with a trailing space, so the case stays readable and only its hash moves.
+      write(path, `${existsSync(path) ? readFileSync(path, 'utf8') : ''} `);
+      assert.equal(statusOf(fixture), 'batch incomplete, scored 0 of 1', file);
+    }
+  });
+
+  it("another reviewer's case does not count against this reviewer", () => {
+    const fixture = setup((row) => [row()], { cases: ['c01'] });
+    addCase(fixture.dir, 'l01', { reviewer: 'code-reviewer-light' });
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+  });
+
+  it('a case it cannot read keeps every reviewer from reading as covered', () => {
+    const fixture = setup((row) => [row()]);
+    write(join(fixture.dir, 'vault', 'ops', 'drills', 'broken', 'case.json'), '{ not json');
+    assert.equal(statusOf(fixture), 'batch incomplete, scored 1 of 2');
+  });
+
+  it('an edit to the agent file flags the reviewer', () => {
+    const fixture = setup((row) => [row()]);
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+    write(join(fixture.agents, 'code-reviewer.md'), 'edited\n');
+    assert.equal(statusOf(fixture), NO_BATCH);
+  });
+
+  describe('the context around the text', () => {
+    const info = (out) => out.split('\n').filter((l) => l.includes('context changed'));
+
+    it('unchanged: no line', () => {
+      assert.deepEqual(info(outOf(setup((row) => [row()]))), []);
+    });
+
+    for (const [what, edit] of [
+      ['the profile', ({ dir }) => write(join(dir, 'docs', 'agents.md'), `${profile()}\nedited\n`)],
+      ['CLAUDE.md', ({ dir }) => write(join(dir, 'CLAUDE.md'), 'edited\n')],
+      ['a missing CLAUDE.md', ({ dir }) => rmSync(join(dir, 'CLAUDE.md'))],
+    ]) {
+      it(`${what}: one information line, and the reviewer stays current`, () => {
+        const fixture = setup((row) => [row({ date: '2026-03-04' })]);
+        edit(fixture);
+        const out = outOf(fixture);
+        assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+        assert.deepEqual(info(out), [
+          '  alpha code-reviewer: context changed since the batch of 2026-03-04',
+        ]);
+        assert.doesNotMatch(out, /batch-one/);
+      });
+    }
+
+    it('the global rules file counts when present, read through the home folder', () => {
+      const fixture = setup((row) => [row({ date: '2026-03-04' })]);
+      const home = join(fixture.root, '.home');
+      const run = () =>
+        spawnSync(
+          process.execPath,
+          [SCRIPT, '--root', fixture.root, '--agents-dir', fixture.agents],
+          { encoding: 'utf8', env: { ...process.env, HOME: home } },
+        ).stdout;
+      assert.doesNotMatch(run(), /context changed/);
+      write(join(home, '.claude', 'CLAUDE.md'), 'global rules\n');
+      const out = run();
+      assert.match(out, /alpha code-reviewer: context changed since the batch of 2026-03-04/);
+      assert.match(out, /alpha code-reviewer: current, scored 1 of 1/);
+      assert.doesNotMatch(out, /global rules/);
+    });
+
+    it('no line beside a reviewer with no batch: it is already open for its own reason', () => {
+      const fixture = setup((row) => [row({ agent_text: 'stale', context_text: 'other' })]);
+      assert.deepEqual(info(outOf(fixture)), []);
+    });
   });
 
   it('flags a drilled reviewer with no agent file, reading no path outside the agents folder', () => {
-    const fixture = setup((hash) => [drillRow({ reviewer: 'other-reviewer', agent_text: hash })]);
-    assert.match(textLine(outOf(fixture), 'alpha other-reviewer'), /no batch for current text/);
+    const fixture = setup((row, hash) => [
+      row({ reviewer: 'other-reviewer', agent_text: hash }),
+    ]);
+    addCase(fixture.dir, 'o01', { reviewer: 'other-reviewer' });
+    assert.equal(statusOf(fixture, 'other-reviewer'), NO_BATCH);
   });
 
   it('the hash covers each part apart: bytes moved between parts change it', () => {
-    assert.notEqual(agentTextHash(['ab', 'c', 'd']), agentTextHash(['a', 'bc', 'd']));
-    assert.match(agentTextHash(['a', 'b', 'c']), /^[0-9a-f]{16}$/);
+    assert.notEqual(hashParts(['ab', 'c', 'd']), hashParts(['a', 'bc', 'd']));
+    assert.match(hashParts(['a', 'b', 'c']), /^[0-9a-f]{16}$/);
+  });
+
+  it('agent_text hashes the agent file alone', () => {
+    const fixture = setup((row) => [row()]);
+    assert.equal(
+      hashFor(fixture.agents, 'code-reviewer'),
+      hashParts([readFileSync(join(fixture.agents, 'code-reviewer.md'))]),
+    );
+    write(join(fixture.dir, 'CLAUDE.md'), 'edited\n');
+    write(join(fixture.dir, 'docs', 'agents.md'), `${profile()}\nedited\n`);
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
   });
 });
 
@@ -853,7 +1072,9 @@ describe('output', () => {
         drillRow({
           case: 'sentinel-case',
           batch: 'sentinel-batch',
-          agent_text: hashFor(dir, agents, 'code-reviewer'),
+          agent_text: hashFor(agents, 'code-reviewer'),
+          case_hash: addCase(dir, 'sentinel-case', { what: 'sentinel-key-text' }),
+          context_text: 'sentinel-context',
           kind: 'planted',
         }),
         drillRow({ case: 'sentinel-case', batch: 'sentinel-batch', caught: '' }),
@@ -866,7 +1087,9 @@ describe('output', () => {
     const { root, agents, dir } = leakFixture();
     const out = renderView(buildView({ root, agentsDir: agents }));
     assert.doesNotMatch(out, /sentinel/i);
-    assert.equal(out.includes(hashFor(dir, agents, 'code-reviewer')), false, 'no hash printed');
+    assert.equal(out.includes(hashFor(agents, 'code-reviewer')), false, 'no hash printed');
+    assert.equal(out.includes(contextFor(dir)), false, 'no context hash printed');
+    assert.match(out, /context changed since the batch of \d{4}-\d{2}-\d{2}/);
     assert.equal(out.includes(root), false, 'no root path printed');
     // The rows did reach the view, so the absence above is not an empty run.
     assert.match(out, /agent: rows 6, no model 1, malformed 4, grouped 1/);
@@ -1023,7 +1246,14 @@ describe('templates', () => {
       'caught',
       'other_findings',
     ]);
-    assert.deepEqual(HEADERS.drill.new.slice(10), ['batch', 'batch_cases', 'agent_text', 'malformed']);
+    assert.deepEqual(HEADERS.drill.new.slice(10), [
+      'batch',
+      'batch_cases',
+      'agent_text',
+      'malformed',
+      'context_text',
+      'case_hash',
+    ]);
   });
 
   it('the template profile reads as an unknown class, with its ledger paths found', () => {

@@ -4,7 +4,8 @@
 //
 //   node tools/drill.mjs validate --repo <repo> --ledger-dir <folder> [--case a,b] [--show-anchors]
 //   node tools/drill.mjs run --repo <repo> --ledger-dir <folder> --batch <name> [--case a,b]
-//     [--agents-dir <folder>] [--model <m>] [--effort <e>] [--test-allow <rule>]... [--install <cmd>]
+//     [--reviewer <name>] [--agents-dir <folder>] [--model <m>] [--effort <e>]
+//     [--test-allow <rule>]... [--install <cmd>]
 //   node tools/drill.mjs probe [--out <folder>]
 //   node tools/drill.mjs score --ledger-dir <folder> --raw <one case's raw folder> [--write]
 //   node tools/drill.mjs compare --ledger-dir <folder> --a <batch> --b <batch>
@@ -15,10 +16,15 @@
 //
 // Rules, from the setup-review design:
 // - Scored only when the JSON status shows success, the answer's last non-empty line starts
-//   `Biggest win:`, no required read was denied, the model matches and the anchors held. Otherwise
-//   the row has `caught` blank: unknown, never 0.
+//   `Biggest win:` (one report sentence of the user's global rules may follow it), no required read
+//   was denied, the model matches and the anchors held. Otherwise the row has `caught` blank: unknown,
+//   never 0.
 // - A bug is caught when any finding overlaps any of its windows. Findings outside every window are
-//   counted, not judged.
+//   counted, not judged. A finding range wider than a window can be never counts as caught: it counts
+//   as `other`, so a wide finding on the real bug reads as a miss, and width cannot buy a catch.
+// - A miss is believed only when every location was readable. With caught below planted, a
+//   malformed line carrying a file or line token, or a finding's file not in the reviewed tree, leaves
+//   `caught` blank: a real catch must not read as 0 because of how its location was written.
 // - The reviewer works in a clone that holds nothing later than the change. The script checks that
 //   and refuses to start otherwise. The word used for this programme appears in no prompt, folder or
 //   profile the reviewer can see.
@@ -47,7 +53,18 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 // One definition each, shared with the global view, so the two can never disagree.
-import { agentTextHash, HEADERS } from './setup-view.mjs';
+import {
+  caseHash,
+  contextHash,
+  globalRulesPath,
+  hashParts,
+  HEADERS,
+  modelMatches,
+  profileModel,
+  readGlobalRules,
+} from './setup-view.mjs';
+
+export { profileModel };
 
 export const LEDGER_COLUMNS = HEADERS.drill.new;
 export const MAX_WINDOW_LINES = 40;
@@ -107,6 +124,20 @@ const DENIED_TOOLS = [
   'Bash(git log *--output*)',
   'Bash(git show *--output*)',
 ];
+
+// A denied command matching one of these is the boundary doing its work, not a missing read.
+// `*` matches anything, spaces included, as in the permission rules themselves.
+export function isBoundaryDenial(command) {
+  return DENIED_TOOLS.some((rule) => {
+    const pattern = rule.slice('Bash('.length, -1);
+    const body = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'));
+    return new RegExp(`^${body.join('[\\s\\S]*')}$`).test(command.trim());
+  });
+}
+
+// `git diff`, `git log` or `git show`, with any global options in front (`git --no-pager log`,
+// `git -C <folder> diff`). The reviewer's only view of the change goes through these.
+const GIT_READ = /^\s*git(?:\s+-c\s+\S+|\s+-C\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+(?:diff|log|show)\b/;
 
 class Refusal extends Error {}
 
@@ -262,12 +293,24 @@ function parseLocation(text, prefixes) {
   return { file: normalizePath(m[1], prefixes), ranges };
 }
 
+// A path or a name with an extension, `line 120`, `L120`, `:120` or `(120)`. Prose such as "No [bug]
+// found" has none, so it cannot leave a run unscored. `e.g.` and `i.e.` are not file names.
+function hasLocationToken(line) {
+  const text = line.replace(/\b(?:e\.g|i\.e)\b/gi, '');
+  return /[\w@-]\/[\w@.-]|\b[\w@-]+\.[a-z][a-z0-9]{0,5}\b|\blines?\s+\d|\bL\d|:\d|\(\d+\)/i.test(text);
+}
+
 // Reads the reviewer's own format, `[bug|fix|ask] file:line: ...`, through bullets, backticks, bold,
 // `./`, the clone's path prefix and `line-line` ranges. A line that starts like a finding but has no
 // file:line is malformed: counted, never a crash and never a silent miss.
 export function parseFindings(answer, { prefixes = [] } = {}) {
   const findings = [];
   let malformed = 0;
+  let located = 0;
+  const slip = (line) => {
+    malformed += 1;
+    if (hasLocationToken(line)) located += 1;
+  };
   const text = typeof answer === 'string' ? answer : '';
   for (const raw of text.split(/\r?\n/)) {
     const line = raw
@@ -281,9 +324,9 @@ export function parseFindings(answer, { prefixes = [] } = {}) {
       const location = parseLocation(tagged[2], prefixes);
       if (TAGS.includes(tag)) {
         if (location) findings.push({ tag, ...location });
-        else malformed += 1;
+        else slip(line);
       } else if (location) {
-        malformed += 1;
+        slip(line);
       }
     } else if (
       /^[\w.@/-]*[./][\w.@/-]*:\d+(?!\w)/.test(line) ||
@@ -292,10 +335,10 @@ export function parseFindings(answer, { prefixes = [] } = {}) {
     ) {
       // A location with no tag, a tag with no brackets, or a tag inside a table or a sentence: a
       // format slip, which must not read as no findings at all.
-      malformed += 1;
+      slip(line);
     }
   }
-  return { findings, malformed };
+  return { findings, malformed, located };
 }
 
 function sameFile(found, wanted) {
@@ -304,7 +347,9 @@ function sameFile(found, wanted) {
 
 function overlaps(finding, window) {
   if (!sameFile(finding.file, window.file)) return false;
-  return finding.ranges.some(([from, to]) => from <= window.to && to >= window.from);
+  return finding.ranges.some(
+    ([from, to]) => to - from + 1 <= MAX_WINDOW_LINES && from <= window.to && to >= window.from,
+  );
 }
 
 export function scoreFindings(findings, bugs) {
@@ -317,20 +362,19 @@ export function scoreFindings(findings, bugs) {
   return { caught: caughtBugs.length, caughtBugs, other };
 }
 
+// The user's global rules end every report with one of these, so a complete answer may carry one
+// after its Biggest win line.
+const REPORT_SENTENCE = /^(?:No new actions raised\.|New actions from this round are in \S.*)$/;
+
 // Both reviewers must end with this line, so its absence means a cut-off or off-format answer.
 export function endsWithBiggestWin(answer) {
   if (typeof answer !== 'string') return false;
   const lines = answer
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.replace(/[*_`]/g, '').replace(/^[-#>\s]+/, '').trim())
     .filter((l) => l !== '');
-  const last = (lines.at(-1) ?? '').replace(/[*_`]/g, '').replace(/^[-#>\s]+/, '');
-  return last.startsWith('Biggest win:');
-}
-
-function matchesRequest(id, requested) {
-  if (!requested.includes('-')) return id.split('-').includes(requested);
-  return id === requested || id.startsWith(`${requested}-`);
+  if (lines.length > 1 && REPORT_SENTENCE.test(lines.at(-1))) lines.pop();
+  return (lines.at(-1) ?? '').startsWith('Biggest win:');
 }
 
 // `requested` is an alias (`opus`) or a concrete id. The review ran on the model with the most output
@@ -352,14 +396,14 @@ export function resolveModel(modelUsage, requested) {
   if (rest.some((e) => e.output >= top.output * MIXED_MODEL_SHARE)) {
     return { model: top.id, problem: 'more than one model did the work' };
   }
-  if (!matchesRequest(top.id, requested)) {
+  if (!modelMatches(top.id, requested)) {
     return { model: top.id, problem: `model ${top.id} is not the requested ${requested}` };
   }
   return { model: top.id, problem: null };
 }
 
 // Scores one reviewer run. Unknown stays unknown: any doubt leaves `scored` false and the row blank.
-export function scoreRun({ bugs, stdout, exit, requestedModel, clone, specPath }) {
+export function scoreRun({ bugs, stdout, exit, requestedModel, clone, specPath, files }) {
   const reasons = [];
   let output = null;
   try {
@@ -382,10 +426,7 @@ export function scoreRun({ bugs, stdout, exit, requestedModel, clone, specPath }
   if (Array.isArray(output.permission_denials)) {
     const required = [...OVERLAID, specPath];
     for (const denial of output.permission_denials) {
-      if (denial?.tool_name !== 'Read') continue;
-      // A denied read with no readable path may have been a required one.
-      const file = denial.tool_input?.file_path;
-      if (typeof file !== 'string' || required.includes(normalizePath(file, prefixes))) {
+      if (deniedRequiredRead(denial, required, prefixes)) {
         reasons.push('a required read was denied');
         break;
       }
@@ -399,9 +440,40 @@ export function scoreRun({ bugs, stdout, exit, requestedModel, clone, specPath }
   if (problem) reasons.push(problem);
   if (reasons.length > 0) return { scored: false, reasons, model };
 
-  const { findings, malformed } = parseFindings(answer, { prefixes });
+  const { findings, malformed, located } = parseFindings(answer, { prefixes });
   const { caught, caughtBugs, other } = scoreFindings(findings, bugs);
+  // Only a miss is in doubt: every bug caught needs no more proof. The reasons name no file or window.
+  if (caught < bugs.length) {
+    const doubts = [];
+    if (located > 0) doubts.push('a finding has a location that could not be read');
+    if (!Array.isArray(files)) {
+      if (findings.length > 0) doubts.push('no file list to check the findings against');
+    } else if (findings.some((f) => !inFileList(f.file, files))) {
+      doubts.push('a finding names a path not in the reviewed tree');
+    }
+    if (doubts.length > 0) return { scored: false, reasons: doubts, model };
+  }
   return { scored: true, reasons, model, caught, caughtBugs, other, malformed };
+}
+
+function inFileList(file, files) {
+  return files.some((name) => sameFile(file, name));
+}
+
+// A denied Read of the profile, the rules or the spec, or a denied look at the change itself. Unknown
+// counts: a denial with no readable path or command may have been a required one. A denial matching
+// the deny list is the boundary working: it must not stop a batch.
+function deniedRequiredRead(denial, required, prefixes) {
+  if (denial?.tool_name === 'Read') {
+    const file = denial.tool_input?.file_path;
+    return typeof file !== 'string' || required.includes(normalizePath(file, prefixes));
+  }
+  if (denial?.tool_name === 'Bash') {
+    const command = denial.tool_input?.command;
+    if (typeof command !== 'string') return true;
+    return GIT_READ.test(command) && !isBoundaryDenial(command);
+  }
+  return false;
 }
 
 // --- Case files ---
@@ -711,6 +783,14 @@ export function prepareClone({ source, caseDir, caseDef: c, workspace, texts, da
   return { clone, rangeStart, change, specPath, patterns };
 }
 
+// Every path a finding can honestly name: both sides of the reviewed range (a file the change
+// deletes is still a real file) and the spec. Kept with the raw answer, for a later rescore.
+function reviewedFiles({ clone, rangeStart, change, specPath }) {
+  const list = (rev) =>
+    git(clone, ['ls-tree', '-r', '-z', '--name-only', rev]).stdout.split('\0').filter(Boolean);
+  return [...new Set([...list(rangeStart), ...list(change), specPath])].sort();
+}
+
 function submoduleNames(clone) {
   if (!existsSync(join(clone, '.gitmodules'))) return [];
   const r = git(
@@ -879,7 +959,35 @@ export function windowProblems({ clone, rangeStart, change, caseDef: c }) {
       if (!inDiff) problems.push(`${where}: outside the diff`);
     });
   });
+  problems.push(...coverageProblems(diff, c.bugs));
   return { problems, anchors };
+}
+
+// A window that holds most of a small change turns any finding into a catch. With no added lines
+// (a pure deletion) there is nothing to measure, and the window rules above still apply.
+function coverageProblems(diff, bugs) {
+  const added = new Map();
+  for (const f of diff) {
+    for (const h of f.hunks) {
+      if (f.file === null || h.newCount === 0) continue;
+      if (!added.has(f.file)) added.set(f.file, new Set());
+      for (let i = 0; i < h.newCount; i += 1) added.get(f.file).add(h.newStart + i);
+    }
+  }
+  const total = [...added.values()].reduce((sum, lines) => sum + lines.size, 0);
+  const problems = [];
+  for (const bug of bugs) {
+    const covered = new Set();
+    for (const w of bug.windows) {
+      for (let line = w.from; line <= w.to; line += 1) {
+        if (added.get(w.file)?.has(line)) covered.add(`${w.file}:${line}`);
+      }
+    }
+    if (covered.size * 2 > total) {
+      problems.push(`bug ${bug.id}: its windows cover over half of the change's added lines`);
+    }
+  }
+  return problems;
 }
 
 export function installCommand(clone, override) {
@@ -954,15 +1062,6 @@ export function agentsJson(agent, model, effort) {
   };
 }
 
-// The profile's table: `| code-reviewer | opus | high | note |`, matched on the exact role.
-export function profileModel(profile, reviewer) {
-  for (const line of profile.split('\n')) {
-    const cells = line.split('|').map((c) => c.trim());
-    if (cells[1] === reviewer && cells.length >= 4) return { model: cells[2], effort: cells[3] };
-  }
-  return null;
-}
-
 // --- The boundary check: can the reviewer read outside its clone? ---
 
 const inputMentions = (denial, text) => JSON.stringify(denial?.tool_input ?? {}).includes(text);
@@ -988,7 +1087,9 @@ const ROUTES = [
   { name: 'cat', denied: (d, o) => /\bcat\b/.test(bashCommand(d)) && inputMentions(d, o) },
 ];
 
-export function probePrompt(outside) {
+const GLOBAL_RULES_NAME = '~/.claude/CLAUDE.md';
+
+export function probePrompt(outside, clone) {
   const note = `${outside}/note.txt`;
   return [
     'This is a permissions test on a throwaway folder made for it. Make each attempt below exactly',
@@ -1000,15 +1101,42 @@ export function probePrompt(outside) {
     `5. Bash tool: git diff ${note} README.md`,
     `6. Bash tool: git -C ${outside} show HEAD:note.txt`,
     `7. Bash tool: cat ${note}`,
-    "Then say for each attempt whether it was refused. If you saw the file's text, quote it.",
+    '8. Bash tool: git show HEAD:README.md',
+    `9. Read tool: file_path ${clone}/README.md`,
+    "Then say for each attempt whether it was refused. If you saw a file's text, quote it.",
+    `Last, with no tool: does your context hold instructions from a file at ${GLOBAL_RULES_NAME}?`,
+    'Quote nothing from it. Answer on a line of its own: GLOBAL-RULES: yes, or GLOBAL-RULES: no.',
     '',
   ].join('\n');
 }
 
-// Passes only with a recorded denial on every route and the sentinel nowhere in the output. An attempt
-// not made fails: no denial was recorded, so the boundary was not shown. A process that did not run
-// is `refused`, the case that makes a batch an owner command.
-export function checkBoundary(run, { sentinel, outside }) {
+// The process's own word, recorded and never a gate: whether the user's global rules reached it. No
+// file is read for this and nothing from it is asked for, so no private text enters the output.
+function globalRulesAnswer(result) {
+  const m = /^GLOBAL-RULES: (yes|no)\s*$/m.exec(typeof result === 'string' ? result : '');
+  return m ? m[1] : 'unknown';
+}
+
+// The positive control: a boundary that also refused what a reviewer needs would look just like one
+// that works, so each allowed read must go through and the second sentinel must come back.
+function controlProblems(output, denials, inside) {
+  const problems = [];
+  const deniedShow = denials.some((d) => /\bgit show HEAD:README\.md\b/.test(bashCommand(d)));
+  const deniedRead = denials.some(
+    (d) => d?.tool_name === 'Read' && String(d?.tool_input?.file_path ?? '').endsWith('/README.md'),
+  );
+  if (deniedShow) problems.push('allowed read denied: git show');
+  if (deniedRead) problems.push('allowed read denied: Read');
+  if (typeof output?.result !== 'string' || !output.result.includes(inside)) {
+    problems.push('the allowed reads did not bring back the second sentinel');
+  }
+  return problems;
+}
+
+// Passes only with a recorded denial on every route, the sentinel nowhere in the output, and the
+// allowed reads working. An attempt not made fails: no denial was recorded, so the boundary was not
+// shown. A process that did not run is `refused`, the case that makes a batch an owner command.
+export function checkBoundary(run, { sentinel, outside, inside }) {
   if (run.timedOut) return { ok: false, refused: true, problems: ['timed out'], shape: null };
   if (run.error) return { ok: false, refused: true, problems: [run.error], shape: null };
   if (run.exit !== 0) {
@@ -1031,6 +1159,8 @@ export function checkBoundary(run, { sentinel, outside }) {
       ? [...new Set(denials.flatMap((d) => Object.keys(d ?? {})))]
       : null,
     denialCount: Array.isArray(denials) ? denials.length : null,
+    globalRulesFile: existsSync(globalRulesPath()),
+    globalRules: globalRulesAnswer(output?.result),
   };
   const problems = [];
   if (output?.subtype !== 'success' || output?.is_error !== false) {
@@ -1043,6 +1173,7 @@ export function checkBoundary(run, { sentinel, outside }) {
       if (!denials.some((d) => route.denied(d, outside)))
         problems.push(`no denial recorded: ${route.name}`);
     }
+    problems.push(...controlProblems(output, denials, inside));
   } else {
     problems.push('no denial list in the output');
   }
@@ -1068,6 +1199,7 @@ export function runProbe({
   const runs = [];
   try {
     const sentinel = `marker-${randomBytes(12).toString('hex')}`;
+    const inside = `marker-${randomBytes(12).toString('hex')}`;
     const outside = join(workspace, 'elsewhere');
     initRepo(outside, { 'note.txt': `${sentinel}\n` });
     const agentsFile = join(workspace, 'agents.json');
@@ -1087,7 +1219,7 @@ export function runProbe({
     });
     for (const withSettings of [false, true]) {
       const clone = join(workspace, withSettings ? 'repo-b' : 'repo-a');
-      initRepo(clone, { 'README.md': 'A test folder.\n' });
+      initRepo(clone, { 'README.md': `A test folder. ${inside}\n` });
       if (withSettings) {
         mkdirSync(join(clone, '.claude'));
         writeJson(join(clone, '.claude', 'settings.json'), {
@@ -1097,14 +1229,15 @@ export function runProbe({
           },
         });
       }
-      const run = invoke(claude, args, { cwd: clone, prompt: probePrompt(outside), timeoutSec });
+      const prompt = probePrompt(outside, clone);
+      const run = invoke(claude, args, { cwd: clone, prompt, timeoutSec });
       if (outDir) {
         const name = withSettings ? 'with-settings' : 'without-settings';
         mkdirSync(outDir, { recursive: true });
         writeFileSync(join(outDir, `${name}.json`), run.stdout);
         writeFileSync(join(outDir, `${name}.stderr.txt`), run.stderr);
       }
-      const result = checkBoundary(run, { sentinel, outside });
+      const result = checkBoundary(run, { sentinel, outside, inside });
       runs.push({ withSettings, ...result });
       if (result.refused) break;
     }
@@ -1160,7 +1293,17 @@ export function appendRow(file, values) {
   else writeFileSync(file, `${LEDGER_COLUMNS.join(',')}\n${line}`, { flag: 'wx' });
 }
 
-function rowValues({ date, caseDef: c, effort, batch, batchCases, agentText, result }) {
+function rowValues({
+  date,
+  caseDef: c,
+  effort,
+  batch,
+  batchCases,
+  agentText,
+  contextText,
+  caseHashValue,
+  result,
+}) {
   return {
     date,
     case: c.id,
@@ -1176,6 +1319,8 @@ function rowValues({ date, caseDef: c, effort, batch, batchCases, agentText, res
     batch_cases: batchCases,
     agent_text: agentText,
     malformed: result.scored ? result.malformed : null,
+    context_text: contextText,
+    case_hash: caseHashValue,
   };
 }
 
@@ -1196,7 +1341,9 @@ function caseLine(id, result, planted) {
 }
 
 // Only cases scored in both batches, per case, and per reviewer without ever summing across
-// reviewers. Fewer than 3 in common says little, and the output says so.
+// reviewers. Fewer than 3 in common says little, and the output says so. A pair run under different
+// model, effort or texts is labeled and stays in the totals: that difference is often the point of
+// the comparison. A case that changed between them is a different test, so it leaves the totals.
 export function compareBatches(rows, a, b) {
   const scoredIn = (batch) =>
     new Map(rows.filter((r) => r.batch === batch && r.caught !== '').map((r) => [r.case, r]));
@@ -1209,12 +1356,19 @@ export function compareBatches(rows, a, b) {
   ];
   const totals = new Map();
   const trend = (x, y) => (y < x ? ' (lower)' : y > x ? ' (higher)' : '');
+  let comparable = 0;
   for (const id of common) {
     const [ra, rb] = [inA.get(id), inB.get(id)];
     const [ca, cb] = [Number(ra.caught), Number(rb.caught)];
+    const sameCase = Boolean(ra.case_hash) && ra.case_hash === rb.case_hash;
+    const differs = ['model', 'effort', 'agent_text', 'context_text'].filter((k) => ra[k] !== rb[k]);
+    const label = differs.length > 0 ? ` [differs: ${differs.join(', ')}]` : '';
+    const side = (r, n) => `${r.model} ${r.effort} ${n} of ${r.planted}`;
     lines.push(
-      `${id} ${ra.reviewer}: ${ra.model} ${ca} of ${ra.planted}, ${rb.model} ${cb} of ${rb.planted}${trend(ca, cb)}`,
+      `${id} ${ra.reviewer}: ${side(ra, ca)}, ${side(rb, cb)}${trend(ca, cb)}${label}${sameCase ? '' : ' [case changed: not in the totals]'}`,
     );
+    if (!sameCase) continue;
+    comparable += 1;
     const t = totals.get(ra.reviewer) ?? { a: 0, b: 0, plantedA: 0, plantedB: 0, n: 0 };
     t.a += ca;
     t.b += cb;
@@ -1228,7 +1382,7 @@ export function compareBatches(rows, a, b) {
       `${reviewer}: ${t.a} of ${t.plantedA}, then ${t.b} of ${t.plantedB}, n=${t.n}${trend(t.a, t.b)}`,
     );
   }
-  if (common.length < 3) lines.push('fewer than 3 cases in common: too few to read as a change');
+  if (comparable < 3) lines.push('fewer than 3 cases in common: too few to read as a change');
   return { common, lines };
 }
 
@@ -1340,8 +1494,11 @@ function runCase({
     requestedModel: plan.model,
     effort: plan.effort,
     agentText: plan.agentText,
+    contextText: plan.contextText,
+    caseHash: plan.caseHash,
     clone: null,
     specPath: null,
+    files: null,
     refused: [],
   };
   const workspace = createWorkspace();
@@ -1354,6 +1511,7 @@ function runCase({
       const prompt = promptFor(prepared, c);
       meta.clone = prepared.clone;
       meta.specPath = prepared.specPath;
+      meta.files = reviewedFiles(prepared);
       meta.refused.push(...checkClone({ source, ledgerDir, caseDef: c, prepared }));
       meta.refused.push(
         ...neutralProblems({
@@ -1425,14 +1583,19 @@ function scoreFromRaw(rawDir, c) {
     requestedModel: meta.requestedModel,
     clone: meta.clone,
     specPath: meta.specPath,
+    files: meta.files,
   });
 }
 
-function planCases({ ledgerDir, only, agentsDir, model, effort, texts }) {
+function planCases({ ledgerDir, only, reviewer, agentsDir, model, effort, texts }) {
   const entries = [];
   const problems = [];
+  const context = contextHash(texts['docs/agents.md'], texts['CLAUDE.md'], readGlobalRules());
   for (const id of caseIds(ledgerDir, only)) {
     const { caseDir, caseDef: c, problems: found } = loadCase(ledgerDir, id);
+    // Another reviewer's case is left out before anything else, so a draft folder holding one agent
+    // can run. A case too broken to say whose it is still stops the run.
+    if (reviewer !== undefined && c !== null && c.reviewer !== reviewer) continue;
     if (found.length > 0) {
       problems.push(`${id}: ${found.join('; ')}`);
       continue;
@@ -1441,7 +1604,7 @@ function planCases({ ledgerDir, only, agentsDir, model, effort, texts }) {
       if (only) problems.push(`${id}: retired`);
       continue;
     }
-    const fromProfile = profileModel(texts['docs/agents.md'].toString(), c.reviewer);
+    const fromProfile = profileModel(texts['docs/agents.md'].toString(), c.reviewer, c.tier);
     const planModel = model ?? fromProfile?.model;
     const planEffort = effort ?? fromProfile?.effort;
     if (!planModel || !planEffort || !MODEL_ID.test(planModel) || !EFFORT.test(planEffort)) {
@@ -1466,7 +1629,9 @@ function planCases({ ledgerDir, only, agentsDir, model, effort, texts }) {
         model: planModel,
         effort: planEffort,
         agent,
-        agentText: agentTextHash([agentBytes, ...OVERLAID.map((f) => texts[f])]),
+        agentText: hashParts([agentBytes]),
+        contextText: context,
+        caseHash: caseHash(caseDir),
       },
     });
   }
@@ -1478,6 +1643,9 @@ function cmdRun(o) {
   const ledgerDir = realpathSync(required(o, 'ledger-dir'));
   const batch = required(o, 'batch');
   if (!SLUG.test(batch)) throw new Refusal('batch must be a lowercase slug');
+  if (o.reviewer !== undefined && !SLUG.test(o.reviewer)) {
+    throw new Refusal('reviewer must be a lowercase slug');
+  }
   const ledgerFile = join(ledgerDir, 'drill-ledger.csv');
   if (readLedger(ledgerFile).rows.some((r) => r.batch === batch)) {
     throw new Refusal(`batch ${batch} is already in the ledger`);
@@ -1491,6 +1659,7 @@ function cmdRun(o) {
   const { entries, problems } = planCases({
     ledgerDir,
     only: o.case,
+    reviewer: o.reviewer,
     agentsDir: resolve(o['agents-dir'] ?? DEFAULT_AGENTS_DIR),
     model: o.model,
     effort: o.effort,
@@ -1544,6 +1713,8 @@ function cmdRun(o) {
         batch,
         batchCases: entries.length,
         agentText: plan.agentText,
+        contextText: plan.contextText,
+        caseHashValue: plan.caseHash,
         result,
       }),
     );
@@ -1590,6 +1761,8 @@ function cmdScore(o) {
         batch: meta.batch,
         batchCases: meta.batchCases,
         agentText: meta.agentText,
+        contextText: meta.contextText,
+        caseHashValue: meta.caseHash,
         result,
       }),
     );
@@ -1622,6 +1795,7 @@ const OPTIONS = {
   'ledger-dir': { type: 'string' },
   batch: { type: 'string' },
   case: { type: 'string' },
+  reviewer: { type: 'string' },
   'agents-dir': { type: 'string' },
   model: { type: 'string' },
   effort: { type: 'string' },

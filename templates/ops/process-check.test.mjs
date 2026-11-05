@@ -762,7 +762,7 @@ describe('--audit', () => {
     );
     repo.change('packages/core/a.ts', message('Mine', 'Ship-Owner: urgent'));
     const r = repo.run('--audit');
-    passes(r, 'open 1, why 1, owner 1');
+    passes(r, 'open 1, unclaimed 0, why 1, owner 1');
     hasLine(r.out, 'task never-closed open');
     assert.match(r.out, /audit: tasks 2,/);
   });
@@ -771,7 +771,7 @@ describe('--audit', () => {
     const repo = makeRepo(t);
     repo.change('packages/core/a.ts', chunk('feature'));
     repo.commit(message('Close', 'Ship-Task: feature', 'Ship-Reviews: code-reviewer'));
-    passes(repo.run('--audit'), 'open 0, why 0, owner 0');
+    passes(repo.run('--audit'), 'open 0, unclaimed 0, why 0, owner 0');
   });
 
   test('a task closed with the wrong reviewer is open, by its whole-history tier', (t) => {
@@ -789,7 +789,7 @@ describe('--audit', () => {
     repo.commit(chunk('before-the-check'));
     repo.write('ops/process-check.json', `${JSON.stringify(CONFIG)}\n`);
     repo.commit('Add the config');
-    passes(repo.run('--audit'), 'audit: tasks 0, open 0, why 0, owner 0');
+    passes(repo.run('--audit'), 'audit: tasks 0, open 0, unclaimed 0, why 0, owner 0');
   });
 
   test('a merge is not read, whatever its message says', (t) => {
@@ -799,7 +799,7 @@ describe('--audit', () => {
     repo.git(['checkout', '--quiet', 'main']);
     const text = message('Merge', 'Ship-Task: in-a-merge', 'Ship-Tier: 2', 'Ship-Tier-Why: x');
     repo.git(['merge', '--quiet', '--no-ff', '-m', text, 'side']);
-    passes(repo.run('--audit'), 'audit: tasks 0, open 0, why 0, owner 0');
+    passes(repo.run('--audit'), 'audit: tasks 0, open 0, unclaimed 0, why 0, owner 0');
   });
 
   test('no config: says so, exit 0', (t) => {
@@ -812,6 +812,130 @@ describe('--audit', () => {
     const repo = makeRepo(t);
     repo.change('packages/core/a.ts', chunk('later'));
     passes(repo.run('--audit', repo.boundary), 'audit: tasks 0,');
+  });
+
+  test('a trust commit with no trailers is unclaimed, with its sha, once; exit 0', (t) => {
+    const repo = makeRepo(t);
+    const bare = repo.change('packages/core/a.ts');
+    repo.change('src/glue.ts', closed('fine', 1, 'code-reviewer-light'));
+    const low = repo.change('packages/core/a.ts', chunk('low', 1));
+    const r = repo.run('--audit');
+    passes(r, 'audit: tasks 2, open 1, unclaimed 2, why 0, owner 0');
+    hasLine(r.out, `unclaimed 2: ${short(bare)} ${short(low)}`);
+  });
+
+  test('no failure prints no unclaimed list', (t) => {
+    const repo = makeRepo(t);
+    repo.change('packages/core/a.ts', closed('fine'));
+    const r = repo.run('--audit');
+    passes(r, 'unclaimed 0');
+    assert.ok(!r.out.includes('unclaimed 0:'), r.out);
+  });
+});
+
+describe('a push that changes the config', () => {
+  const edited = (over) => `${JSON.stringify({ ...CONFIG, ...over })}\n`;
+
+  test('emptying a reviewer list fails by the rules from before the push', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.write('ops/process-check.json', edited({ reviews: { ...CONFIG.reviews, 2: [] } }));
+    const weakened = repo.commit(chunk('weaken'));
+    const r = repo.run(before, 'HEAD');
+    fails(r, 'task weaken open (by the config before this push)');
+    hasLine(
+      r.out,
+      'notice this push changes the config: judged by both, a failure of either fails',
+    );
+    // The new rules alone pass it, which is the hole. Red once: the next push starts from them.
+    passes(repo.run(weakened, 'HEAD'), 'checked 0');
+    repo.change('packages/core/a.ts', chunk('next'));
+    passes(repo.run(weakened, 'HEAD'), 'checked 1');
+  });
+
+  test('moving a trust path to tier 0 fails by the rules from before the push', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.write('ops/process-check.json', edited({ tier0: [...CONFIG.tier0, 'packages/core/'] }));
+    repo.commit(closed('reword'));
+    const trust = repo.change('packages/core/a.ts');
+    const r = repo.run(before, 'HEAD');
+    fails(r, `${short(trust)} trust path: no Ship-Tier (by the config before this push)`);
+    fails(r, `${short(trust)} trust path: no Ship-Task (by the config before this push)`);
+  });
+
+  test('a rule the push adds counts too, with no suffix', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.write(
+      'ops/process-check.json',
+      edited({ reviews: { ...CONFIG.reviews, 2: ['code-reviewer', 'triage'] } }),
+    );
+    repo.commit(closed('tighten'));
+    fails(repo.run(before, 'HEAD'), 'task tighten missing triage');
+  });
+
+  test('a failure under both rules prints once, with no suffix', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.write('ops/process-check.json', edited({ tier2New: [] }));
+    const bare = repo.commit('No trailers');
+    const r = repo.run(before, 'HEAD');
+    fails(r, `${short(bare)} trust path: no Ship-Tier`);
+    assert.equal(r.out.split(`${short(bare)} trust path: no Ship-Tier`).length, 2, r.out);
+  });
+
+  test('passes when both rules pass, and says it read both', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.write('ops/process-check.json', edited({ tier2New: [] }));
+    repo.commit(closed('harmless'));
+    const r = repo.run(before, 'HEAD');
+    passes(r, 'checked 1');
+    hasLine(
+      r.out,
+      'notice this push changes the config: judged by both, a failure of either fails',
+    );
+  });
+
+  test('an unchanged config is read once: no notice', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.change('packages/core/a.ts', closed('plain'));
+    const r = repo.run(before, 'HEAD');
+    passes(r, 'checked 1');
+    assert.ok(!r.out.includes('judged by both'), r.out);
+  });
+
+  test('no config before the push: the new rules alone, no notice', (t) => {
+    const repo = makeRepo(t);
+    const r = repo.run(`${repo.boundary}~1`, repo.boundary);
+    passes(r, 'checked 0');
+    assert.ok(!r.out.includes('judged by both'), r.out);
+    assert.ok(!repo.run(ZEROS, 'HEAD').out.includes('judged by both'));
+  });
+
+  test('a config before the push that it cannot use fails, naming which', (t) => {
+    const repo = makeRepo(t);
+    repo.write('ops/process-check.json', 'not json\n');
+    const broken = repo.commit(closed('break'));
+    repo.write('ops/process-check.json', `${JSON.stringify(CONFIG)}\n`);
+    repo.commit(closed('repair'));
+    fails(repo.run(broken, 'HEAD'), 'fail: ops/process-check.json before this push: not JSON');
+  });
+});
+
+describe('the failure message', () => {
+  test('says what to do with a commit that has no task to close', (t) => {
+    const repo = makeRepo(t);
+    const before = repo.git(['rev-parse', 'HEAD']);
+    repo.change('packages/core/a.ts');
+    const r = repo.run(before, 'HEAD');
+    assert.equal(r.status, 1, r.out);
+    const text = r.out.replace(/\s+/g, ' ');
+    assert.ok(text.includes('This run does not hold back a server.'), r.out);
+    assert.ok(text.includes('A commit with no Ship-Task has no task to close'), r.out);
+    assert.ok(text.includes('--audit lists it as unclaimed'), r.out);
   });
 });
 

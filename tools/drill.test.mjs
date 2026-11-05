@@ -32,6 +32,7 @@ import {
   createWorkspace,
   endsWithBiggestWin,
   installCommand,
+  isBoundaryDenial,
   LEDGER_COLUMNS,
   MAX_WINDOW_LINES,
   neutralProblems,
@@ -51,12 +52,14 @@ import {
   validateCase,
   windowProblems,
 } from './drill.mjs';
-import { agentTextHash, buildView } from './setup-view.mjs';
+import { buildView, caseHash, contextHash, hashParts } from './setup-view.mjs';
 
 const DRILL = join(dirname(fileURLToPath(import.meta.url)), 'drill.mjs');
 const TODAY = '2030-01-02';
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'fx-')));
 after(() => rmSync(scratch, { recursive: true, force: true }));
+// No real home: the runner hashes ~/.claude/CLAUDE.md when present.
+process.env.HOME = join(scratch, 'empty-home');
 
 let counter = 0;
 const newDir = (name = 'd') => {
@@ -327,8 +330,16 @@ if (m) {
   if (mode === 'allowed-by-settings' && fs.existsSync('.claude/settings.json')) denials = [];
   if (mode === 'skip-cat') denials = denials.filter((d) => !String(d.tool_input.command).startsWith('cat'));
   if (mode === 'skip-implicit') denials = denials.filter((d) => !String(d.tool_input.command).startsWith('git diff /'));
-  let answer = 'All refused.';
-  if (mode === 'leak') answer = fs.readFileSync(outside + '/note.txt', 'utf8');
+  const deniedRead = { tool_name: 'Read', tool_use_id: 'x', tool_input: { file_path: process.cwd() + '/README.md' } };
+  if (mode === 'deny-allowed') denials.push(bash('git show HEAD:README.md'), deniedRead);
+  if (mode === 'deny-show') denials.push(bash('git show HEAD:README.md'));
+  if (mode === 'deny-read') denials.push(deniedRead);
+  const readme = fs.readFileSync('README.md', 'utf8').trim();
+  let answer = 'Outside refused. Inside: ' + readme + '\\nGLOBAL-RULES: no';
+  if (mode === 'deny-allowed' || mode === 'no-quote') answer = 'All refused.\\nGLOBAL-RULES: no';
+  if (mode === 'global-yes') answer = readme + '\\nGLOBAL-RULES: yes';
+  if (mode === 'global-silent') answer = readme;
+  if (mode === 'leak') answer = readme + fs.readFileSync(outside + '/note.txt', 'utf8');
   process.stdout.write(JSON.stringify({
     type: 'result', subtype: mode === 'status-error' ? 'error_during_execution' : 'success',
     is_error: mode === 'status-error', result: answer,
@@ -513,6 +524,42 @@ test('parser: a line that starts like a finding without file:line is malformed, 
   }
 });
 
+test('parser: a malformed line counts as located only with a file or line token', () => {
+  for (const line of [
+    '[fix] src/a.ts: no line number',
+    '[bug] src/a.ts:0: line zero',
+    '[bug] src/a.ts:12abc: not a number',
+    '[note] src/a.ts:12: an unknown tag on a location',
+    '- src/a.ts:12: a location with no tag',
+    '### src/a.ts:12',
+    '**Bug** src/a.ts:12: a tag with no brackets',
+    '| [bug] | src/a.ts:12 | a table row |',
+    '[bug] packages/x/src/y.ts line 120: a line in words',
+    '[bug] packages/x/src/y.ts(120): a line in brackets',
+    '[bug] y.ts L120: a line in another style',
+    '[bug] the caller at line 120 reads it late',
+    '[bug] the caller at L120 reads it late',
+    '[bug] the caller (120) reads it late',
+    '[bug] in the helpers folder src/price the round is off',
+  ]) {
+    const { malformed, located } = parseFindings(line);
+    assert.equal(malformed, 1, line);
+    assert.equal(located, 1, line);
+  }
+  for (const line of [
+    '[bug] no location given',
+    '[bug]',
+    'See the [fix] finding above.',
+    'No [bug] found.',
+    'No [bug] here, e.g. in the rounding, i.e. nowhere.',
+    '[ask] should this wait for the next release?',
+  ]) {
+    const { malformed, located } = parseFindings(line);
+    assert.equal(malformed, 1, line);
+    assert.equal(located, 0, line);
+  }
+});
+
 test('parser: prose and odd input are neither findings nor malformed', () => {
   for (const input of [
     '',
@@ -523,7 +570,7 @@ test('parser: prose and odd input are neither findings nor malformed', () => {
     undefined,
     42,
   ]) {
-    assert.deepEqual(parseFindings(input), { findings: [], malformed: 0 });
+    assert.deepEqual(parseFindings(input), { findings: [], malformed: 0, located: 0 });
   }
 });
 
@@ -560,6 +607,18 @@ test('scorer: a range that overlaps counts, the same line in another file does n
   assert.equal(scoreOf('[bug] b/src/a.ts:100: x').caught, 1);
 });
 
+test('scorer: a range wider than a window can be never catches, and counts as other', () => {
+  assert.equal(MAX_WINDOW_LINES, 40);
+  assert.equal(scoreOf('[bug] src/a.ts:71-110: x').caught, 1, 'exactly the limit');
+  assert.deepEqual(scoreOf('[bug] src/a.ts:70-110: x'), { caught: 0, caughtBugs: [], other: 1 });
+  assert.deepEqual(scoreOf('[bug] src/a.ts:1-5000: x'), { caught: 0, caughtBugs: [], other: 1 });
+  assert.deepEqual(scoreOf('[bug] src/a.ts:5000-1: x'), { caught: 0, caughtBugs: [], other: 1 });
+  // Another range of the same finding still reads, and a second finding is judged on its own.
+  assert.equal(scoreOf('[bug] src/a.ts:1-5000, 100: x').caught, 1);
+  const both = scoreOf('[bug] src/a.ts:1-5000: wide\n[bug] src/a.ts:100: narrow');
+  assert.deepEqual(both, { caught: 1, caughtBugs: ['b1'], other: 1 });
+});
+
 test('scorer: any window catches its bug, and each bug counts once', () => {
   assert.deepEqual(scoreOf('[bug] src/caller.ts:5: x').caughtBugs, ['b1']);
   const twice = scoreOf('[bug] src/a.ts:100: x\n[fix] src/caller.ts:6: y\n[ask] src/a.ts:105: z');
@@ -582,6 +641,7 @@ const scoreInput = (stdout, extra = {}) => ({
   requestedModel: 'opus',
   clone: '/tmp/rv-x/repo',
   specPath: '.agent-runs/2030-01-02-change/spec.md',
+  files: ['src/a.ts', 'src/b.ts', '.agent-runs/2030-01-02-change/spec.md'],
   ...extra,
 });
 
@@ -599,6 +659,124 @@ test('scoreRun: no findings at all is a real zero, because the answer is complet
   const r = scoreRun(scoreInput(reply(WIN)));
   assert.equal(r.scored, true);
   assert.equal(r.caught, 0);
+});
+
+test('scoreRun: a miss is believed only when every location could be read', () => {
+  const blank = (answer, reason, extra) => {
+    const r = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), extra));
+    assert.equal(r.scored, false, answer);
+    assert.deepEqual(r.reasons, [reason], answer);
+    assert.equal(r.caught, undefined, answer);
+    assert.equal(r.model, 'claude-opus-9-9', answer);
+  };
+  const unread = 'a finding has a location that could not be read';
+  const elsewhere = 'a finding names a path not in the reviewed tree';
+  blank('[bug] src/a.ts line 11: x', unread);
+  blank('[bug] src/a.ts(11): x', unread);
+  blank('[bug] a.ts:11: only the base name', elsewhere);
+  blank('[bug] a/a.ts:11: not a real diff prefix', elsewhere);
+  blank('[bug] src/gone.ts:11: x', elsewhere);
+  blank('[bug] src/a.ts:1: x', 'no file list to check the findings against', { files: undefined });
+  blank('[bug] src/a.ts:1: x', 'no file list to check the findings against', { files: null });
+
+  // One bug of two caught: the other may be behind the unreadable line.
+  const two = [{ id: 'b1', windows: [{ file: 'src/a.ts', from: 10, to: 12 }] },
+    { id: 'b2', windows: [{ file: 'src/a.ts', from: 40, to: 42 }] }];
+  const partly = scoreRun(
+    scoreInput(reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts line 41: y\n${WIN}`), { bugs: two }),
+  );
+  assert.equal(partly.scored, false);
+  assert.deepEqual(partly.reasons, [unread]);
+  // Both caught: nothing to doubt.
+  const both = scoreRun(
+    scoreInput(
+      reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts:41: y\n[bug] src/a.ts line 41: z\n${WIN}`),
+      { bugs: two },
+    ),
+  );
+  assert.equal(both.scored, true);
+  assert.equal(both.caught, 2);
+
+  // The reason carries no file or window, whatever the finding held.
+  const quiet = scoreRun(scoreInput(reply(`[bug] secret-name.ts:11: x\n${WIN}`)));
+  assert.ok(!quiet.reasons.join(' ').includes('secret-name'));
+  assert.ok(!quiet.reasons.join(' ').includes('src/a.ts'));
+});
+
+test('scoreRun: what does not cast doubt on a miss', () => {
+  const zero = (answer, extra) => {
+    const r = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), extra));
+    assert.equal(r.scored, true, answer);
+    assert.equal(r.caught, 0, answer);
+  };
+  zero('Nothing to report.');
+  zero('No [bug] found.');
+  zero('[bug] no location given');
+  zero('[bug] src/a.ts:1: outside the window, a real file');
+  zero('[bug] a/src/a.ts:1: a diff prefix on a real file');
+  zero('[ask] .agent-runs/2030-01-02-change/spec.md:3: about the spec');
+  zero('[bug] src/a.ts:1-5000: a wide finding on a real file reads as a miss');
+  zero('Nothing to report.', { files: undefined });
+  zero('Nothing to report.', { files: [] });
+
+  // Every bug caught: the odd line beside it changes nothing.
+  const full = scoreRun(
+    scoreInput(reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts line 11: y\n[bug] gone.ts:1: z\n${WIN}`)),
+  );
+  assert.equal(full.scored, true);
+  assert.equal(full.caught, 1);
+  assert.equal(full.malformed, 1);
+});
+
+test('scoreRun: a denied look at the change unscores, a denial by the deny list does not', () => {
+  const good = `[bug] src/a.ts:11: x\n${WIN}`;
+  const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
+  const score = (...denials) => scoreRun(scoreInput(reply(good, { permission_denials: denials })));
+  for (const command of [
+    'git diff a..b',
+    'git diff',
+    'git log --oneline a..b',
+    'git show b',
+    '  git show b:src/a.ts',
+    'git --no-pager diff a..b',
+    'git -C /tmp/rv-x/repo log -3',
+    'git -c core.pager=cat show b',
+    'git diff a..b | head -n 50',
+  ]) {
+    const r = score(bash(command));
+    assert.equal(r.scored, false, command);
+    assert.deepEqual(r.reasons, ['a required read was denied'], command);
+  }
+  for (const command of [
+    'git diff --no-index -- /etc/hosts README.md',
+    'git diff /etc/hosts README.md',
+    'git diff HEAD /etc/hosts',
+    'git diff ../other README.md',
+    'git diff ~/notes README.md',
+    'git diff $HOME/notes README.md',
+    'git diff "/etc/hosts" README.md',
+    'git diff --output=out.txt a..b',
+    'git log --output=out.txt',
+    'git show --output=out.txt b',
+  ]) {
+    assert.equal(isBoundaryDenial(command), true, command);
+    assert.equal(score(bash(command)).scored, true, command);
+  }
+  for (const command of [
+    'cat CLAUDE.md',
+    'git status',
+    'git blame src/a.ts',
+    'git diffx',
+    // A deny rule's text inside another command is not that rule: it matches from the start.
+    'echo git diff --output=out.txt a..b',
+  ]) {
+    assert.equal(isBoundaryDenial(command), false, command);
+    assert.equal(score(bash(command)).scored, true, command);
+  }
+  // A Bash denial with no readable command may have been a required read.
+  assert.equal(score({ tool_name: 'Bash', tool_input: {} }).scored, false);
+  // Allowed by the deny list's own text: an ordinary range is no boundary denial.
+  assert.equal(isBoundaryDenial('git diff a..b'), false);
 });
 
 test('scoreRun: each doubt leaves it unscored, never 0', () => {
@@ -661,6 +839,23 @@ test('endsWithBiggestWin: tolerates markup, needs the words last', () => {
   assert.equal(endsWithBiggestWin('**Biggest win:** y'), true);
   assert.equal(endsWithBiggestWin('- Biggest win: y'), true);
   assert.equal(endsWithBiggestWin('Biggest win: y\nmore'), false);
+  // One report sentence from the global rules may follow, and only that.
+  assert.equal(endsWithBiggestWin('Biggest win: y\nNo new actions raised.'), true);
+  assert.equal(endsWithBiggestWin('Biggest win: y\n\nNo new actions raised.\n'), true);
+  assert.equal(
+    endsWithBiggestWin('Biggest win: y\nNew actions from this round are in ops/actions.md.'),
+    true,
+  );
+  assert.equal(endsWithBiggestWin('**Biggest win:** y\n**No new actions raised.**'), true);
+  assert.equal(endsWithBiggestWin('Biggest win: y\nNo new actions raised.\nNo new actions raised.'), false);
+  assert.equal(
+    endsWithBiggestWin('Biggest win: y\nNo new actions raised.\nNew actions from this round are in a.md.'),
+    false,
+  );
+  assert.equal(endsWithBiggestWin('No new actions raised.'), false);
+  assert.equal(endsWithBiggestWin('[bug] a.ts:1: x\nNo new actions raised.'), false);
+  assert.equal(endsWithBiggestWin('Biggest win: y\nNo new actions raised. And more.'), false);
+  assert.equal(endsWithBiggestWin('Biggest win: y\nNew actions from this round are in'), false);
   assert.equal(endsWithBiggestWin(''), false);
   assert.equal(endsWithBiggestWin(undefined), false);
 });
@@ -751,6 +946,16 @@ test('parseChecks, profileModel, parseAgentFile, agentsJson', () => {
     effort: 'medium',
   });
   assert.equal(profileModel(PROFILE, 'absent'), null);
+  // Tier 3: its row when it lists the reviewer, otherwise the role's row.
+  assert.deepEqual(profileModel(PROFILE, 'code-reviewer', 3), { model: 'opus', effort: 'xhigh' });
+  assert.deepEqual(profileModel(PROFILE, 'code-reviewer', 2), { model: 'opus', effort: 'high' });
+  assert.deepEqual(profileModel(PROFILE, 'code-reviewer-light', 3), {
+    model: 'sonnet',
+    effort: 'medium',
+  });
+  assert.deepEqual(profileModel(PROFILE, 'builder-heavy', 3), { model: 'opus', effort: 'xhigh' });
+  assert.equal(profileModel(PROFILE, 'builder-heavy', 2), null);
+  assert.equal(profileModel(PROFILE, 'absent', 3), null);
 
   const agent = parseAgentFile(AGENT_TEXT);
   assert.equal(agent.name, 'code-reviewer');
@@ -808,6 +1013,14 @@ test('caseProblems: shape, windows at most the stated size, and no key text in t
     assert.ok(!problems.join(' ').includes('secret-name'));
     assert.ok(!problems.join(' ').includes(WHAT));
   }
+});
+
+test('caseProblems: a planted case with a fix sha is refused, and nothing else is wrong with it', () => {
+  const fx = makeFixture();
+  const dir = addPlanted(fx, 'p01');
+  const def = defOf(fx, 'p01');
+  assert.deepEqual(caseProblems(def, dir), []);
+  assert.deepEqual(caseProblems({ ...def, fix: fx.fix }, dir), ['a planted case has fix null']);
 });
 
 // --- The clone ---
@@ -1213,6 +1426,61 @@ test('validate: a bad case fails for the named reason', () => {
   );
 });
 
+test('validate: a bug whose windows cover over half of the added lines is refused', () => {
+  const fx = makeFixture();
+  // The change adds 10 lines, 5 to 14 of the file.
+  const windows = (...spans) =>
+    spans.map(([from, to]) => ({
+      file: 'src/price.mjs',
+      from,
+      to,
+      anchor: anchorOf(BUGGY_PRICE, from, to),
+    }));
+  const problemsOf = (id, bugs) => {
+    addReplay(fx, id, { bugs });
+    return validateCase({ source: fx.repo, ledgerDir: fx.ledgerDir, id }).problems;
+  };
+  const one = (...spans) => [{ id: 'b1', what: WHAT, windows: windows(...spans) }];
+  assert.deepEqual(problemsOf('half', one([5, 9])), [], 'exactly half is allowed');
+  assert.deepEqual(problemsOf('overlap', one([5, 9], [7, 9])), [], 'a line counts once');
+  assert.deepEqual(problemsOf('context', one([1, 8])), [], 'context lines are not added lines');
+  const over = problemsOf('over', one([5, 10]));
+  assert.deepEqual(over, ["bug b1: its windows cover over half of the change's added lines"]);
+  assert.deepEqual(
+    problemsOf('split', one([5, 7], [11, 13])),
+    ["bug b1: its windows cover over half of the change's added lines"],
+    'windows add up',
+  );
+  assert.deepEqual(
+    problemsOf('each', [
+      { id: 'b1', what: WHAT, windows: windows([5, 8]) },
+      { id: 'b2', what: 'Another made-up finding', windows: windows([11, 14]) },
+    ]),
+    [],
+    'each bug is judged alone',
+  );
+  assert.ok(!over.join(' ').includes('src/price.mjs'), 'no file in the message');
+});
+
+test('validate: an install that changes tracked files is refused', () => {
+  const fx = makeFixture();
+  addPlanted(fx, 'p01');
+  const r = validateCase({
+    source: fx.repo,
+    ledgerDir: fx.ledgerDir,
+    id: 'p01',
+    install: 'echo more >> README.md',
+  });
+  assert.deepEqual(r.problems, ['the install changed tracked files']);
+  const clean = validateCase({
+    source: fx.repo,
+    ledgerDir: fx.ledgerDir,
+    id: 'p01',
+    install: 'true',
+  });
+  assert.deepEqual(clean.problems, [], 'an install that changes nothing tracked is fine');
+});
+
 test('validate: a planted bug that makes the tests fail is refused', () => {
   const fx = makeFixture();
   const edit = (text) => text.replace(KNOWN_LINE, '  const known = rates; // BREAKS_TESTS');
@@ -1365,13 +1633,16 @@ test('run: the ledger row, the raw output and the clean-up', () => {
   assert.equal(row.batch_cases, '1');
   assert.equal(row.malformed, '0');
   assert.match(row.date, /^\d{4}-\d{2}-\d{2}$/);
-  // The hash covers the reviewer text and both overlaid texts, the same way the global view does.
-  assert.equal(row.agent_text, agentTextHash([AGENT_TEXT, PROFILE, textsOf(fx)['CLAUDE.md']]));
+  // `agent_text` is the reviewer's own file. The rest around it is `context_text`, and the case is
+  // `case_hash`: three hashes, the same way the global view reads them.
+  assert.equal(row.agent_text, hashParts([AGENT_TEXT]));
+  assert.equal(row.context_text, contextHash(PROFILE, textsOf(fx)['CLAUDE.md'], ''));
+  assert.equal(row.case_hash, caseHash(join(fx.ledgerDir, 'drills', 's01')));
 
   const header = readFileSync(ledgerFile(fx), 'utf8').split('\n')[0];
   assert.equal(
     header,
-    'date,case,kind,reviewer,model,effort,tier,planted,caught,other_findings,batch,batch_cases,agent_text,malformed',
+    'date,case,kind,reviewer,model,effort,tier,planted,caught,other_findings,batch,batch_cases,agent_text,malformed,context_text,case_hash',
   );
   assert.deepEqual(LEDGER_COLUMNS, header.split(','));
 
@@ -1393,6 +1664,47 @@ test('run: the ledger row, the raw output and the clean-up', () => {
   const [call] = fake.reviews();
   assert.equal(existsSync(dirname(call.cwd)), false);
   assert.equal(existsSync(join(fx.repo, 'vault', 'ops', 'drills', 's01', 'case.json')), true);
+});
+
+test('run: meta.json records the file list a rescore checks findings against', () => {
+  const fx = makeFixture();
+  const fake = makeFake();
+  fake.queue(canned(inWindow()));
+  assert.equal(runCli(fx, fake, 'one').status, 0);
+  const meta = JSON.parse(readFileSync(join(rawFolder(fx, 'one', 's01'), 'meta.json'), 'utf8'));
+  assert.ok(meta.files.includes('src/price.mjs'));
+  assert.ok(meta.files.includes('README.md'));
+  assert.ok(meta.files.includes(meta.specPath), 'the spec can be named too');
+  assert.ok(!meta.files.includes('src/later.mjs'), 'nothing later than the change');
+  assert.ok(!meta.files.some((f) => f.startsWith('vault/ops')), 'nothing private');
+});
+
+test('run: a finding with a path not in the tree leaves the row blank and stops the batch', () => {
+  const fx = makeFixture();
+  addReplay(fx, 's02');
+  const fake = makeFake();
+  fake.queue(canned(`[bug] price.mjs:8: the base name only\n${WIN}`), canned(inWindow()));
+  const r = runCli(fx, fake, 'one');
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /s01: caught blank \(a finding names a path not in the reviewed tree\)/);
+  assert.equal(rowsOf(fx).length, 1);
+  assert.equal(rowsOf(fx)[0].caught, '');
+  assert.equal(fake.reviews().length, 1);
+});
+
+test('reviewed files: a file the change deletes can be named, so a miss stays a miss', () => {
+  const fx = makeFixture();
+  const edit = (text) => `${text}// One more made-up line.\n// And another.\n`;
+  addPlanted(fx, 'p01', { edit, needle: '// One more made-up line.' });
+  const caseDir = join(fx.ledgerDir, 'drills', 'p01');
+  // The planted patch also removes a file the base tree holds.
+  const removal = `--- a/README.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-A demo app.\n`;
+  writeFileSync(join(caseDir, 'planted.patch'), `${readFileSync(join(caseDir, 'planted.patch'), 'utf8')}${removal}`);
+  const fake = makeFake();
+  fake.queue(canned(`[bug] README.md:1: removing this loses the intro\n${WIN}`));
+  const r = runCli(fx, fake, 'one', ['--case', 'p01']);
+  assert.equal(r.status, 0, r.out + r.err);
+  assert.match(r.out, /p01: caught 0, other 1/);
 });
 
 test('run: output carries no key text', () => {
@@ -1443,6 +1755,105 @@ test('run: a draft text and a named model go through the definition, and the has
   assert.equal(rows[1].effort, 'low');
   const argv = fake.reviews().at(-1).argv;
   assert.equal(argv[argv.indexOf('--model') + 1], 'sonnet');
+});
+
+test('run: a tier 3 case runs at the Tier 3 row, another reviewer at its own row', () => {
+  const fx = makeFixture();
+  addReplay(fx, 's02', { tier: 3 });
+  addReplay(fx, 'l01', { tier: 3, reviewer: 'code-reviewer-light' });
+  const fake = makeFake();
+  fake.queue(
+    canned(inWindow(), { modelUsage: { 'claude-sonnet-9-9': { outputTokens: 5 } } }),
+    canned(inWindow()),
+    canned(inWindow()),
+  );
+  const r = runCli(fx, fake, 'one');
+  assert.equal(r.status, 0, r.out + r.err);
+  const effortOf = (id) => rowsOf(fx).find((row) => row.case === id).effort;
+  assert.equal(effortOf('s01'), 'high');
+  assert.equal(effortOf('s02'), 'xhigh');
+  assert.equal(effortOf('l01'), 'medium');
+  const flags = fake.reviews().map((c) => c.argv[c.argv.indexOf('--effort') + 1]);
+  assert.deepEqual(flags.sort(), ['high', 'medium', 'xhigh']);
+});
+
+test('run: --reviewer runs only that reviewer, so a draft folder may hold one agent', () => {
+  const fx = makeFixture();
+  addReplay(fx, 'l01', { reviewer: 'code-reviewer-light' });
+  const draftDir = newDir('draft');
+  write(draftDir, 'code-reviewer.md', AGENT_TEXT.replace('You review', 'Draft: you review'));
+  const fake = makeFake();
+  fake.queue();
+  const without = runCli({ ...fx, agentsDir: draftDir }, fake, 'all');
+  assert.equal(without.status, 1);
+  assert.match(without.err, /no agent file for code-reviewer-light/);
+  assert.equal(rowsOf(fx).length, 0);
+
+  fake.queue(canned(inWindow()));
+  const r = runCli({ ...fx, agentsDir: draftDir }, fake, 'one', ['--reviewer', 'code-reviewer']);
+  assert.equal(r.status, 0, r.out + r.err);
+  assert.match(r.out, /batch one: scored 1, batch_cases 1/);
+  assert.deepEqual(rowsOf(fx).map((row) => row.case), ['s01']);
+
+  const none = runCli(fx, fake, 'none', ['--reviewer', 'absent-reviewer']);
+  assert.equal(none.status, 1);
+  assert.match(none.err, /no cases to run/);
+  const bad = runCli(fx, fake, 'bad', ['--reviewer', 'Bad Name']);
+  assert.equal(bad.status, 1);
+  assert.match(bad.err, /reviewer must be a lowercase slug/);
+});
+
+test('run: --reviewer leaves out a broken case of another reviewer, never an unreadable one', () => {
+  const fx = makeFixture();
+  addReplay(fx, 'l01', { reviewer: 'code-reviewer-light', added: 'soon' });
+  const fake = makeFake();
+  fake.queue(canned(inWindow()));
+  const r = runCli(fx, fake, 'one', ['--reviewer', 'code-reviewer']);
+  assert.equal(r.status, 0, r.out + r.err);
+
+  mkdirSync(join(fx.ledgerDir, 'drills', 'broken'));
+  writeFileSync(join(fx.ledgerDir, 'drills', 'broken', 'case.json'), '{');
+  const stopped = runCli(fx, fake, 'two', ['--reviewer', 'code-reviewer']);
+  assert.equal(stopped.status, 1);
+  assert.match(stopped.err, /case\.json is not JSON/);
+});
+
+test('run: an agent file whose name differs from the reviewer is refused before any token', () => {
+  const fx = makeFixture();
+  write(fx.agentsDir, 'code-reviewer.md', AGENT_TEXT.replace('name: code-reviewer', 'name: someone-else'));
+  const fake = makeFake();
+  fake.queue();
+  const r = runCli(fx, fake, 'one');
+  assert.equal(r.status, 1);
+  assert.match(r.err, /agent file for code-reviewer is not readable/);
+  assert.equal(fake.calls().length, 0);
+  assert.equal(rowsOf(fx).length, 0);
+});
+
+test('run: the global rules file moves context_text, never agent_text or case_hash', () => {
+  const fx = makeFixture();
+  const fake = makeFake();
+  const home = newDir('home');
+  fake.queue(canned(inWindow()));
+  const run = (batch) =>
+    spawnSync(
+      process.execPath,
+      [DRILL, 'run', '--repo', fx.repo, '--ledger-dir', fx.ledgerDir, '--batch', batch,
+        '--agents-dir', fx.agentsDir, '--claude', fake.bin],
+      { encoding: 'utf8', env: { ...process.env, FAKE_CLAUDE_DIR: fake.dir, HOME: home } },
+    );
+  assert.equal(run('without').status, 0);
+  write(home, '.claude/CLAUDE.md', 'Made-up global rules.\n');
+  fake.queue(canned(inWindow()));
+  assert.equal(run('with').status, 0);
+  const [a, b] = rowsOf(fx);
+  assert.notEqual(a.context_text, b.context_text);
+  assert.equal(a.agent_text, b.agent_text);
+  assert.equal(a.case_hash, b.case_hash);
+  assert.equal(
+    b.context_text,
+    contextHash(PROFILE, textsOf(fx)['CLAUDE.md'], 'Made-up global rules.\n'),
+  );
 });
 
 test('run: the definition passed with --agents is what was hashed', () => {
@@ -1743,6 +2154,62 @@ test('probe: passes only with a recorded denial on every route, in both runs, wi
   assert.deepEqual(Object.keys(shape.modelUsage), ['claude-haiku-9-9']);
   assert.deepEqual(shape.denialFields.sort(), ['tool_input', 'tool_name', 'tool_use_id']);
   assert.equal(shape.denialCount, 7);
+  assert.equal(shape.globalRules, 'no');
+  assert.equal(shape.globalRulesFile, false);
+});
+
+test('probe: the positive control, allowed reads must go through and bring the sentinel back', () => {
+  const fake = makeFake();
+  process.env.FAKE_CLAUDE_DIR = fake.dir;
+  const problemsOf = (mode) => {
+    fake.probe(mode);
+    const report = runProbe({ claude: fake.bin, timeoutSec: 30 });
+    assert.equal(report.ok, false, mode);
+    assert.equal(report.refused, false, mode);
+    return report.runs[0].problems;
+  };
+  // Everything refused looks like a working boundary until the allowed reads are tried.
+  assert.deepEqual(problemsOf('deny-allowed'), [
+    'allowed read denied: git show',
+    'allowed read denied: Read',
+    'the allowed reads did not bring back the second sentinel',
+  ]);
+  assert.deepEqual(problemsOf('deny-show'), ['allowed read denied: git show']);
+  assert.deepEqual(problemsOf('deny-read'), ['allowed read denied: Read']);
+  assert.deepEqual(problemsOf('no-quote'), [
+    'the allowed reads did not bring back the second sentinel',
+  ]);
+  // The prompt asks for both reads, and the prompt never holds the sentinel.
+  const prompt = fake.calls().at(-1).prompt;
+  assert.match(prompt, /git show HEAD:README\.md/);
+  assert.match(prompt, /Read tool: file_path \S+\/README\.md/);
+  assert.ok(!/marker-/.test(prompt));
+});
+
+test('probe: records what the process says about the global rules, as a word and no more', () => {
+  const fake = makeFake();
+  process.env.FAKE_CLAUDE_DIR = fake.dir;
+  const home = newDir('home');
+  const saved = process.env.HOME;
+  process.env.HOME = home;
+  write(home, '.claude/CLAUDE.md', 'Made-up private text.\n');
+  try {
+    for (const [mode, word] of [
+      ['pass', 'no'],
+      ['global-yes', 'yes'],
+      ['global-silent', 'unknown'],
+    ]) {
+      fake.probe(mode);
+      const report = runProbe({ claude: fake.bin, timeoutSec: 30 });
+      assert.equal(report.ok, true, mode);
+      assert.equal(report.runs[0].shape.globalRules, word, mode);
+      assert.equal(report.runs[0].shape.globalRulesFile, true, mode);
+      assert.ok(!JSON.stringify(report).includes('Made-up private text'), mode);
+    }
+  } finally {
+    process.env.HOME = saved;
+  }
+  assert.ok(!fake.calls().at(-1).prompt.includes('Made-up private text'));
 });
 
 test('probe: an attempt not made fails, including the implicit no-index route', () => {
@@ -1802,7 +2269,7 @@ test('probe: a timeout, a failed start or a crash counts as refused, with the ex
 });
 
 test('checkBoundary: output that is not JSON or has no denial list fails', () => {
-  const opts = { sentinel: 'marker-x', outside: '/tmp/elsewhere' };
+  const opts = { sentinel: 'marker-x', outside: '/tmp/elsewhere', inside: 'marker-y' };
   const base = { timedOut: false, error: null, exit: 0, stderr: '' };
   assert.equal(checkBoundary({ ...base, stdout: 'oops' }, opts).ok, false);
   const noList = checkBoundary(
@@ -1811,6 +2278,18 @@ test('checkBoundary: output that is not JSON or has no denial list fails', () =>
   );
   assert.ok(noList.problems.includes('no denial list in the output'));
   assert.equal(checkBoundary({ ...base, stdout: 'null' }, opts).ok, false);
+});
+
+test('reviewerArgs: --output is denied on each git read, since it writes a file', () => {
+  const args = reviewerArgs({ agentsFile: 'a', agent: 'b', model: 'c', effort: 'd' });
+  const denied = args.slice(args.indexOf('--disallowedTools') + 1);
+  for (const rule of [
+    'Bash(git diff *--output*)',
+    'Bash(git log *--output*)',
+    'Bash(git show *--output*)',
+  ]) {
+    assert.ok(denied.includes(rule), rule);
+  }
 });
 
 test('reviewerArgs: an outside path is denied for git diff, in every form it can take', () => {
@@ -1902,6 +2381,10 @@ const row = (batch, id, caught, overrides = {}) => ({
   planted: '1',
   reviewer: 'code-reviewer',
   model: 'claude-opus-9-9',
+  effort: 'high',
+  agent_text: 'text',
+  context_text: 'context',
+  case_hash: 'same',
   batch_cases: '3',
   ...overrides,
 });
@@ -1923,11 +2406,68 @@ test('compare: only cases scored in both, per case and per reviewer, and it says
   assert.deepEqual(common, ['l1', 's1', 's2']);
   const text = lines.join('\n');
   assert.match(text, /compare a -> b: common 3, not compared 3/);
-  assert.match(text, /s1 code-reviewer: claude-opus-9-9 1 of 1, claude-opus-9-9 0 of 1 \(lower\)/);
+  assert.match(
+    text,
+    /s1 code-reviewer: claude-opus-9-9 high 1 of 1, claude-opus-9-9 high 0 of 1 \(lower\)$/m,
+  );
   assert.match(text, /code-reviewer: 2 of 2, then 1 of 2, n=2 \(lower\)/);
   assert.match(text, /code-reviewer-light: 1 of 1, then 1 of 1, n=1/);
   assert.ok(!text.includes('fewer than 3'));
   assert.ok(!text.includes('3 of 3'), 'groups are never summed');
+});
+
+test('compare: a pair differing in model, effort or a text is labeled and stays in the totals', () => {
+  for (const [column, value, shown] of [
+    ['model', 'claude-sonnet-9-9', 'model'],
+    ['effort', 'low', 'effort'],
+    ['agent_text', 'edited', 'agent_text'],
+    ['context_text', 'edited', 'context_text'],
+  ]) {
+    const { lines } = compareBatches(
+      [row('a', 's1', 1), row('b', 's1', 0, { [column]: value })],
+      'a',
+      'b',
+    );
+    const text = lines.join('\n');
+    assert.match(text, new RegExp(`\\(lower\\) \\[differs: ${shown}\\]$`, 'm'), column);
+    assert.match(text, /code-reviewer: 1 of 1, then 0 of 1, n=1 \(lower\)/, column);
+  }
+  const all = compareBatches(
+    [
+      row('a', 's1', 1),
+      row('b', 's1', 1, { model: 'm', effort: 'e', agent_text: 'x', context_text: 'y' }),
+    ],
+    'a',
+    'b',
+  );
+  assert.match(all.lines.join('\n'), /\[differs: model, effort, agent_text, context_text\]/);
+  assert.match(all.lines.join('\n'), /claude-opus-9-9 high 1 of 1, m e 1 of 1/, 'prints effort');
+  const same = compareBatches([row('a', 's1', 1), row('b', 's1', 1)], 'a', 'b');
+  assert.ok(!same.lines.join('\n').includes('differs'));
+});
+
+test('compare: only a changed case leaves the totals, and it does not count towards 3', () => {
+  const rows = [
+    row('a', 's1', 1),
+    row('b', 's1', 1),
+    row('a', 's2', 1),
+    row('b', 's2', 1),
+    row('a', 's3', 1),
+    row('b', 's3', 0, { case_hash: 'other' }),
+  ];
+  const { common, lines } = compareBatches(rows, 'a', 'b');
+  const text = lines.join('\n');
+  assert.deepEqual(common, ['s1', 's2', 's3']);
+  assert.match(text, /^s3 code-reviewer: .* \(lower\) \[case changed: not in the totals\]$/m);
+  assert.match(text, /code-reviewer: 2 of 2, then 2 of 2, n=2/);
+  assert.match(text, /fewer than 3 cases in common/);
+
+  const unknown = compareBatches(
+    [row('a', 's1', 1, { case_hash: '' }), row('b', 's1', 1, { case_hash: '' })],
+    'a',
+    'b',
+  );
+  assert.match(unknown.lines.join('\n'), /\[case changed: not in the totals\]/, 'unknown is not same');
 });
 
 test('compare: fewer than 3 in common is stated, and nothing in common is not a crash', () => {
@@ -1942,7 +2482,7 @@ test('compare CLI: reads the ledger and counts malformed rows', () => {
   const dir = newDir('ledger');
   writeFileSync(
     join(dir, 'drill-ledger.csv'),
-    `${LEDGER_COLUMNS.join(',')}\n2030-01-01,s1,replay,code-reviewer,m-1,high,2,1,1,0,a,1,h,0\n2030-01-02,s1,replay,code-reviewer,m-1,high,2,1,0,1,b,1,h,0\nshort,row\n`,
+    `${LEDGER_COLUMNS.join(',')}\n2030-01-01,s1,replay,code-reviewer,m-1,high,2,1,1,0,a,1,h,0,c,k\n2030-01-02,s1,replay,code-reviewer,m-1,high,2,1,0,1,b,1,h,0,c,k\nshort,row\n`,
   );
   const r = spawnSync(
     process.execPath,
@@ -1950,7 +2490,7 @@ test('compare CLI: reads the ledger and counts malformed rows', () => {
     { encoding: 'utf8' },
   );
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /s1 code-reviewer: m-1 1 of 1, m-1 0 of 1 \(lower\)/);
+  assert.match(r.stdout, /s1 code-reviewer: m-1 high 1 of 1, m-1 high 0 of 1 \(lower\)/);
   assert.match(r.stdout, /malformed ledger rows: 1/);
 });
 

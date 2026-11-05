@@ -18,9 +18,14 @@
 // - Rows with no model are counted and excluded; they are never guessed or backfilled.
 // - Groups are never merged. Too few is a stated constant and is not adjusted.
 // - Acceptance is a hint only; drill scores are the basis for comparing models.
+// - A reviewer is current only by a batch for its own text, at the profile's model and effort for
+//   each case's tier, that scored every active case as it now stands. A later batch at another model,
+//   effort or text, or of fewer cases, is ignored: a named comparison cannot reopen anything. A change
+//   in the profile or rules around that text prints one information line and reopens nothing.
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -65,6 +70,8 @@ const DRILL = [
   'batch_cases',
   'agent_text',
   'malformed',
+  'context_text',
+  'case_hash',
 ];
 
 export const HEADERS = {
@@ -263,10 +270,9 @@ function classifyRow(row, rules) {
   return rules.valid(row) ? 'grouped' : 'malformed';
 }
 
-// A short hash of everything a reviewer's instructions come from: its agent file, then the
-// project's `docs/agents.md` and `CLAUDE.md`. Must agree with what the drill runner stores in
-// `agent_text`. Each part is prefixed by its length, so bytes moved between parts change the hash.
-export function agentTextHash(parts) {
+// A short hash of some byte strings. Each part is prefixed by its length, so bytes moved between
+// parts change the hash. Must agree with what the drill runner stores.
+export function hashParts(parts) {
   const hash = createHash('sha256');
   for (const part of parts) {
     const bytes = Buffer.from(part);
@@ -276,33 +282,134 @@ export function agentTextHash(parts) {
   return hash.digest('hex').slice(0, 16);
 }
 
-function currentTextHash(projectDir, reviewer, agentsDir) {
+// `agent_text`: the reviewer's own agent file, and nothing else.
+function currentAgentHash(reviewer, agentsDir) {
   try {
-    return agentTextHash([
-      readFileSync(join(agentsDir, `${reviewer}.md`)),
-      readFileSync(join(projectDir, 'docs', 'agents.md')),
-      readFileSync(join(projectDir, 'CLAUDE.md')),
-    ]);
+    return hashParts([readFileSync(join(agentsDir, `${reviewer}.md`))]);
   } catch {
     // A text that cannot be read has no known hash, so no batch can be shown to match it.
     return null;
   }
 }
 
-// Compares the current text with the latest scored batch for this reviewer. Rows are in file
-// order, and the ledger is append-only. `scored` and `planned` cover the whole batch: a batch that
-// died midway has fewer scored cases than planned, which does not count as done.
-export function compareText(drillRows, reviewer, currentHash) {
-  const scored = drillRows.filter((r) => !isBlank(r.caught));
-  const latest = scored.filter((r) => r.reviewer === reviewer).at(-1);
-  if (latest === undefined || currentHash === null || latest.agent_text !== currentHash) {
-    return { current: false };
+// Bytes, or empty when the file is absent: a missing file is part of what `context_text` records.
+const bytesOrEmpty = (path) => {
+  try {
+    return readFileSync(path);
+  } catch {
+    return Buffer.alloc(0);
   }
-  const inBatch = drillRows.filter((r) => r.batch === latest.batch);
+};
+
+export const globalRulesPath = () => join(homedir(), '.claude', 'CLAUDE.md');
+export const readGlobalRules = () => bytesOrEmpty(globalRulesPath());
+
+// `context_text`: what surrounds the reviewer's text: the project's profile and rules, and the
+// user's global rules when present. Changing often and not part of what a reviewer checks, so a
+// difference only informs. Order: docs/agents.md, CLAUDE.md, the global file.
+export const contextHash = (profile, rules, globalRules) => hashParts([profile, rules, globalRules]);
+
+function currentContextHash(projectDir) {
+  return contextHash(
+    bytesOrEmpty(join(projectDir, 'docs', 'agents.md')),
+    bytesOrEmpty(join(projectDir, 'CLAUDE.md')),
+    readGlobalRules(),
+  );
+}
+
+// `case_hash`: everything that defines a case, so a reworded key or spec never compares with itself.
+export function caseHash(caseDir) {
+  return hashParts([
+    readFileSync(join(caseDir, 'case.json')),
+    readFileSync(join(caseDir, 'spec.md')),
+    bytesOrEmpty(join(caseDir, 'planted.patch')),
+  ]);
+}
+
+// The cases not retired, with their current hash. One that cannot be read is counted: it must keep
+// a reviewer from reading as covered, and it cannot be given to any one reviewer.
+export function readActiveCases(drillsDir) {
+  const active = [];
+  let unreadable = 0;
+  let names = [];
+  try {
+    names = readdirSync(drillsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    // No cases folder: no active cases, and so no batch can cover them.
+  }
+  for (const id of names.sort()) {
+    try {
+      const c = JSON.parse(readFileSync(join(drillsDir, id, 'case.json'), 'utf8'));
+      if (typeof c?.reviewer !== 'string') unreadable += 1;
+      else if (c.retired === null || c.retired === undefined) {
+        active.push({ id, reviewer: c.reviewer, hash: caseHash(join(drillsDir, id)) });
+      }
+    } catch {
+      unreadable += 1;
+    }
+  }
+  return { active, unreadable };
+}
+
+// The profile's table: `| code-reviewer | opus | high | note |`, matched on the exact role. For a
+// tier 3 case the `Tier 3:` row wins when it lists the reviewer (`| Tier 3: builder-heavy,
+// code-reviewer | opus | xhigh | |`); any other reviewer keeps its role's row.
+export function profileModel(profile, reviewer, tier) {
+  const rows = profile
+    .split('\n')
+    .map((line) => line.split('|').map((cell) => cell.trim()))
+    .filter((cells) => cells.length >= 4);
+  const tierRow = rows.find((cells) => {
+    const m = /^Tier 3:\s*(.*)$/.exec(cells[1]);
+    return m !== null && m[1].split(',').some((name) => name.trim() === reviewer);
+  });
+  const row = tier === 3 && tierRow ? tierRow : rows.find((cells) => cells[1] === reviewer);
+  return row ? { model: row[2], effort: row[3] } : null;
+}
+
+// `id` is the concrete model id from a run's output; `requested` an alias (`opus`) or a concrete id.
+export function modelMatches(id, requested) {
+  if (!requested.includes('-')) return id.split('-').includes(requested);
+  return id === requested || id.startsWith(`${requested}-`);
+}
+
+// The batch that speaks for this reviewer now. Rows are in file order, and the ledger is append-only,
+// so the latest batch is the one whose rows come last. Only rows scored for the current text, at the
+// profile's model and effort for their tier, count at all; so a named comparison, a draft text or a
+// model trial cannot change the answer. Current: the latest batch where those rows cover every active
+// case as it now stands, and every one was planned with at least that many cases. So a `--case` run
+// (batch_cases 1) can never be the answer, even if two share a batch name, unless the reviewer has
+// only that one case, when it is a whole batch.
+export function reviewerStatus({ rows, reviewer, agentHash, profile, cases, unreadable, context }) {
+  const active = cases.filter((c) => c.reviewer === reviewer);
+  const planned = active.length + unreadable;
+  const counts = (r) => {
+    if (isBlank(r.caught) || r.reviewer !== reviewer || r.agent_text !== agentHash) return false;
+    const want = profileModel(profile, reviewer, Number(r.tier));
+    return want !== null && r.effort === want.effort && modelMatches(r.model, want.model);
+  };
+  const latestFirst = [...new Set(rows.filter(counts).map((r) => r.batch).reverse())];
+  if (agentHash === null || planned === 0 || latestFirst.length === 0) return { current: false };
+
+  const covered = (batch) => {
+    const scored = rows.filter((r) => r.batch === batch && counts(r));
+    return active.filter((c) => scored.some((r) => r.case === c.id && r.case_hash === c.hash)).length;
+  };
+  const plannedInFull = (batch) =>
+    rows.filter((r) => r.batch === batch && counts(r)).every((r) => Number(r.batch_cases) >= planned);
+  const full = latestFirst.find((batch) => covered(batch) === planned && plannedInFull(batch));
+  if (full === undefined) {
+    return { current: false, incomplete: true, scored: covered(latestFirst[0]), planned };
+  }
+  const last = rows.filter((r) => r.batch === full && counts(r)).at(-1);
+  const contextDiffers = !isBlank(last.context_text) && last.context_text !== context;
   return {
     current: true,
-    scored: new Set(scored.filter((r) => r.batch === latest.batch).map((r) => r.case)).size,
-    planned: Math.max(...inBatch.map((r) => Number(r.batch_cases))),
+    scored: planned,
+    planned,
+    ...(contextDiffers ? { contextChangedSince: last.date } : {}),
   };
 }
 
@@ -384,9 +491,23 @@ export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR }) {
     }
 
     const reviewers = new Set([...DRILLED_REVIEWERS, ...drillRows.map((r) => r.reviewer)]);
+    // Found by folder, like the drill ledger. Read here and never printed.
+    const { active, unreadable } =
+      paths.agent === undefined
+        ? { active: [], unreadable: 0 }
+        : readActiveCases(join(dir, dirname(paths.agent), 'drills'));
+    const context = currentContextHash(dir);
     project.texts = [...reviewers].sort().map((reviewer) => ({
       reviewer,
-      ...compareText(drillRows, reviewer, currentTextHash(dir, reviewer, agentsDir)),
+      ...reviewerStatus({
+        rows: drillRows,
+        reviewer,
+        agentHash: currentAgentHash(reviewer, agentsDir),
+        profile,
+        cases: active,
+        unreadable,
+        context,
+      }),
     }));
     view.projects.push(project);
   }
@@ -484,10 +605,14 @@ export function renderView(view) {
   view.projects.forEach((p, i) => {
     for (const t of p.texts) {
       const label = `${p.name ?? `project-${i + 1}`} ${t.reviewer}`;
-      if (!t.current) lines.push(`  ${label}: no batch for current text`);
-      else if (t.scored < t.planned) {
+      if (t.incomplete) {
         lines.push(`  ${label}: batch incomplete, scored ${t.scored} of ${t.planned}`);
-      } else lines.push(`  ${label}: current, scored ${t.scored} of ${t.planned}`);
+      } else if (!t.current) lines.push(`  ${label}: no batch for current text`);
+      else lines.push(`  ${label}: current, scored ${t.scored} of ${t.planned}`);
+      // Information only. A date, since no batch name is printed.
+      if (t.contextChangedSince !== undefined) {
+        lines.push(`  ${label}: context changed since the batch of ${t.contextChangedSince}`);
+      }
     }
   });
   return `${lines.join('\n')}\n`;

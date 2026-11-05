@@ -8,6 +8,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -386,6 +387,30 @@ describe('ops/ci-status.sh and the process job', () => {
     assert.equal(lines.filter((line) => line.includes('process-check')).length, 1);
   });
 
+  // Job ids and job-level keys of a workflow, read by indent: no YAML parser here. A form this cannot
+  // read gives no jobs, which the test below refuses.
+  function readJobs(yaml) {
+    const lines = yaml.split('\n');
+    const jobs = new Map();
+    const start = lines.indexOf('jobs:');
+    if (start === -1) return jobs;
+    let id = null;
+    for (const line of lines.slice(start + 1)) {
+      if (/^[^\s#]/.test(line)) break;
+      const job = /^ {2}['"]?([^\s'":#]+)['"]?\s*:/.exec(line);
+      if (job) {
+        id = job[1];
+        jobs.set(id, []);
+        continue;
+      }
+      const key = /^ {4}([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+      if (key && id !== null) jobs.get(id).push({ key: key[1], value: key[2].trim() });
+    }
+    return jobs;
+  }
+  const WORKFLOWS = join(ROOT, '.github/workflows');
+  const workflowFiles = () => readdirSync(WORKFLOWS).filter((file) => /\.ya?ml$/.test(file));
+
   it('the CI workflow has a job check, and nothing named like the process job', () => {
     const ci = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     assert.match(ci, /^jobs:\n {2}check:$/m);
@@ -393,5 +418,32 @@ describe('ops/ci-status.sh and the process job', () => {
     assert.ok(!/^\s+name:\s*process-check\s*$/m.test(ci));
     // A job-level `if:` could conclude skipped, which the gate reads as CI not testing the commit.
     assert.ok(!/^ {4}if:/m.test(ci));
+  });
+
+  it('nothing renames the check run: no job-level name or strategy in that job', () => {
+    const jobs = readJobs(readFileSync(join(WORKFLOWS, 'ci.yml'), 'utf8'));
+    const keys = jobs.get('check').map(({ key }) => key);
+    // Either would rename the run, so every commit would wait. A step's `name:` is deeper, and fine.
+    assert.ok(!keys.includes('name'), 'job-level name');
+    assert.ok(!keys.includes('strategy'), 'job-level strategy');
+    assert.ok(keys.includes('steps'), 'the job-level keys were read');
+  });
+
+  it('only ci.yml has a job check, and no other job takes either name', () => {
+    const files = workflowFiles();
+    assert.ok(files.includes('ci.yml'));
+    for (const file of files) {
+      const jobs = readJobs(readFileSync(join(WORKFLOWS, file), 'utf8'));
+      assert.ok(jobs.size > 0, `${file}: no jobs read`);
+      // Any other job the gate would read as CI: a new workflow must not stand for a tested commit.
+      assert.equal(jobs.has('check'), file === 'ci.yml', `${file}: job id check`);
+      if (file !== 'process.yml') assert.ok(!jobs.has('process-check'), `${file}: process job`);
+      for (const [id, keys] of jobs) {
+        for (const { key, value } of keys) {
+          const named = key === 'name' ? value.replace(/^['"]|['"]$/g, '') : null;
+          assert.ok(named !== 'check' && named !== 'process-check', `${file}: job ${id} is named`);
+        }
+      }
+    }
   });
 });

@@ -116,6 +116,14 @@ A trailer anywhere else is not read, so it counts as missing and fails loudly. `
 - **A task still open at the end of a push fails.** That is the case worth flagging: the server took
   code before its review. The fix is to run the missing review and commit under the same slug. No
   history rewrite, and the next push's range is judged on its own, so a mistake is red once.
+- **A commit with no `Ship-Task` has no task to close**, and only a history rewrite could add one.
+  So: review it and log it. `--audit` keeps listing it as `unclaimed`, and the setup review treats
+  only a rise in that count since its last review as open.
+- **A push that changes the config is judged by both versions**, the one before the push and the one
+  it brings, and fails if either fails. So emptying a reviewer list, or moving a trust path to
+  `tier0`, cannot pass in the same push. Failures only the old rules find say `(by the config before
+  this push)`, and the next push starts from the new rules, so this too is red once. A config before
+  the push that cannot be read fails the run.
 
 Why this shape: per commit would force chunk commits to lie, or a review before each commit. "Last
 commit of the push" would let a reviewed task cover an unreviewed one pushed with it.
@@ -129,7 +137,7 @@ commit of the push" would let a reviewed task cover an unreviewed one pushed wit
 | Tier 0 by path | No trailers needed: docs and tests, including tests on trust paths. |
 | Owner commit | No automatic exemption. `Ship-Owner: <why>` passes with a notice and joins no task. Otherwise a red run, and the next session reviews the change. An absent attribution line is not the signal: if the harness ever stopped adding it, every commit would pass silently. |
 | Revert | No exemption: it is a change like any other. |
-| `before` is zeros | Checks boundary..after: the first push of a repo. |
+| `before` is zeros | Checks boundary..after: the first push of a repo. No earlier config. |
 | `before` not found or not an ancestor (a force push) | Fail, `range unknown`. Never a silent pass. |
 | A shallow clone | Fail, `range unknown`: its boundary would be wrong. The workflow uses `fetch-depth: 0`. |
 
@@ -141,9 +149,11 @@ shas, fixed texts, validated slugs and config names, never commit text.
 
 - `node ops/process-check.mjs origin/main` at the end of a task, so CI is only the backstop.
 - `node ops/process-check.mjs --audit` (not in the workflow, no CI effect) reads boundary..HEAD and
-  prints tasks never closed, and counts: `audit: tasks 12, open 1, why 3, owner 1`. A task that
-  closed in a later push is not open. The setup review reads it, because a task closed in no push is
-  otherwise flagged by nothing after its one red run.
+  prints tasks never closed, the commits that failed a rule with no task to close (`unclaimed 2:
+  <sha> <sha>`), and counts: `audit: tasks 12, open 1, unclaimed 2, why 3, owner 1`. A task that
+  closed in a later push is not open. An unclaimed commit stays listed, since it cannot be closed
+  without a history rewrite. The setup review reads it, because a task closed in no push, or a commit
+  with no trailers, is otherwise flagged by nothing after its one red run.
 
 ### The config
 
@@ -172,8 +182,9 @@ yet would have given `success` for a commit CI never tested. So the script does 
   the unfiltered counts.
 - `success` needs a run named exactly `check` that concluded `success`. A rename, an added workflow,
   missing CI, or a `check` that concluded `skipped` or `neutral` (CI did not test the commit) gives
-  `pending` and the existing 24-hour alert. So `check` must have no job-level `if:`, which a test
-  asserts. Other runs keep the rule: skipped and neutral count as passed.
+  `pending` and the existing 24-hour alert. So `check` must have no job-level `if:`, `name:` or
+  `strategy:` (the last two rename the run), which a test asserts. Other runs keep the rule: skipped
+  and neutral count as passed.
 
 The second way a check can hold back a server is the normal suite, which CI and the server's version
 check both run. So `ops/process-check.test.mjs` stays out of it: `ops/` is in no test project there,
@@ -183,16 +194,19 @@ The files still go through the project's linter and formatter, like any file.
 What keeps this true: `ops/process-check.test.mjs` asserts the job id in `process.yml` equals the name
 in `ci-status.sh`, and that the job sets no `name:` (it would rename the check run). The gate's own
 tests (`ops/ci-status.test.mjs` in the templates; in a project they belong in the normal suite, so
-they run in the job the server waits on) assert `ci.yml` has a job `check` and nothing named
-`process-check`.
+they run in the job the server waits on) read every workflow file: only `ci.yml` has a job `check`,
+only `process.yml` a job `process-check`, no other job is named either, and `check` sets no job-level
+`name:` or `strategy:`. A step's `name:` is fine.
 
 ### Adding it to a project
 
 Two pushes, in this order. The server runs its installed `ci-status.sh` against the new commit, so the
 filter only takes effect after an update:
 
-1. Push the new `ops/ci-status.sh` and its tests. After the server has updated, on the server
-   `grep -c process-check ops/ci-status.sh` prints 1.
+1. Push the new `ops/ci-status.sh` and its tests. The condition for the second push is both of these
+   on the server: `grep -c process-check ops/ci-status.sh` prints 1, and `update.log` holds
+   `<App> is up: <x> -> <first push's short sha>`. The grep alone is not enough: an update merges
+   first and runs its checks after, so during an update that then fails and goes back, it reads 1.
 2. Only then push the workflow, script, tests and config, and add `.github/workflows/` and the
    `ops/process-check` files to the profile's Paths. The script's failure message points at
    `docs/ci.md`, so the project needs a short one with a "Process check" section. The script and its
@@ -200,11 +214,15 @@ filter only takes effect after an update:
    `process` and `console` for `.mjs` files adds that for these two files.
 
 To undo, go the other way: remove the workflow, check the server, then revert the filter. With the
-filter gone and the job still running, a red process run holds the server back again.
+filter gone and the job still running, a red process run holds the server back again, from the push
+after the revert: the revert itself goes in under the installed filter.
 
 ### Limits
 
 - Trailers are self-reported. This catches a forgotten review, not a false claim.
+- A push that edits `process.yml` or the script runs its own edited version, and GitHub reads the
+  workflow from the pushed commit. Only the config is also judged by its earlier version. Both files
+  are on the Paths list, so such an edit is Tier 2 by path, and a person reads that diff.
 - CI cannot see a private submodule's contents, so private code is unverified. A bump shows only as
   a gitlink.
 - Reviewers that depend on whether a change is visible (UX, trust) are not required: "visible" is not
