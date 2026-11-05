@@ -63,6 +63,12 @@ pushes the private submodule's new commits first, then the main repo (the main r
 a submodule commit the server must be able to fetch). If the submodule push fails, the main push
 stops too.
 
+A push naming a commit or another branch (`git push origin <hash>:main`) fails with `src refspec
+... must name a ref` when the submodule has new commits to send, because git passes the same name
+on to the submodule, and nothing is pushed. Push the submodule first, then the main repo with
+`git push --recurse-submodules=check origin <hash>:main`; `check` refuses if the submodule's commit
+is not on GitHub yet.
+
 ## Names
 
 - Packages: `@myapp/<name>`.

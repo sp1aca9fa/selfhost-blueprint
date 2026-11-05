@@ -144,8 +144,9 @@ Each item, 5-20 lines:
 - Exactly what to do or answer (a command block marks every part to replace as
   `<<IN_CAPITALS>>`, with a line before it saying what to replace and where to find it).
 
-A command step is run first on a throwaway copy, and its expected output comes from that run. A
-step that can only run on the server says `Not rehearsed: <why>`. When items with commands were
+A command step is run first on a throwaway copy, and its expected output comes from that run. The
+copy keeps the real repo's git settings, submodules and remote branches, and a run that should fail
+is shown failing. A step that can only run on the server says `Not rehearsed: <why>`. When items with commands were
 added or changed: once per task, `code-reviewer-light` with `Mode: actions`, the file's path and the
 item ids; one ledger row, reviewer `code-reviewer-light-actions`.
 
