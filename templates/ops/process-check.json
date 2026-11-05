@@ -1,0 +1,33 @@
+{
+  "tier2": [
+    "packages/core/",
+    "packages/db/",
+    "ops/update-server.sh",
+    "ops/ci-status.sh",
+    "ops/process-check.mjs",
+    "ops/process-check.json",
+    ".github/workflows/"
+  ],
+  "tier2New": [],
+  "tier0": ["docs/", "**/*.md", "**/*.test.*"],
+  "reviews": {
+    "0": [],
+    "1": ["code-reviewer-light"],
+    "2": ["code-reviewer"],
+    "3": ["code-reviewer", "triage"]
+  },
+  "profileBullets": {
+    "<`packages/core/`, `packages/db/`, ...>": {
+      "patterns": ["packages/core/", "packages/db/"]
+    },
+    "<single files: `ops/update-server.sh`, ...>": {
+      "patterns": [
+        "ops/update-server.sh",
+        "ops/ci-status.sh",
+        "ops/process-check.mjs",
+        "ops/process-check.json",
+        ".github/workflows/"
+      ]
+    }
+  }
+}

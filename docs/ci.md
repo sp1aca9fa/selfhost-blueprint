@@ -26,9 +26,11 @@ set, so nothing in CI reaches live sources.
 - Tests are deterministic: no live network, no real clock races. A flaky test is a bug, fixed
   first (never retried until green, never skipped).
 - Never loosen a check to make CI pass; report the failure.
-- Claude checks the latest runs at the start of every session (`gh run list --limit 3`) and fixes
-  a red run first, unasked: it holds back the server's update, and the owner never has to watch
-  GitHub's emails.
+- Claude checks the latest runs at the start of every session
+  (`gh run list --workflow CI --limit 3`) and fixes a red run first, unasked: it holds back the
+  server's update, and the owner never has to watch GitHub's emails.
+- Separately, a red run of the process workflow (`gh run list --workflow Process --limit 3`) means
+  review the open task. It has no effect on the server ("Process check" below).
 - A test never depends on today's date: data at a fixed day with code that reads the clock passes
   for weeks, then fails on every run. Pin the clock in the test. To check a project, run its tests
   with the clock shifted forward by a preload (`NODE_OPTIONS=--require <file>`).
@@ -43,10 +45,16 @@ set, so nothing in CI reaches live sources.
     public, following up to 3 https redirects (a renamed repo); the older commit status API is not
     used. The owner and repo come from
     `git remote get-url origin` (ssh or https github.com forms; anything else gives `unknown`).
-  - One word per commit: `success` (at least one run, all completed, each success, neutral or
-    skipped), `failure` (a completed run with any other conclusion), `pending` (a run not
-    completed yet, or none yet, with no time limit), `unknown` (curl error, HTTP error or rate
-    limit, unreadable answer, bad sha). The script never prints the API's answer.
+  - One word per commit, over the counted runs (all but the process job, dropped by its exact
+    name): `success` (the run named exactly `check` completed, and every counted run completed,
+    each success, neutral or skipped), `failure` (a completed counted run with any other
+    conclusion), `pending` (a counted run not completed yet, or no completed `check`, with no time
+    limit: CI not started yet, or renamed or removed, which the 24-hour alert then reports),
+    `unknown` (curl error, HTTP error or rate limit, unreadable answer, bad sha; also more runs
+    than the page of 100 shows, counted before the process job is dropped, unless a visible
+    counted run failed). The script never prints the API's answer.
+  - `check` is the job id in `ci.yml`. Renaming it holds every update back until the script
+    follows; a project with another CI job id changes the script to match.
   - Only `success` updates. `pending` and `unknown` change nothing (the next tick asks again; the
     log notes a status once per commit). When the server has gone 24 hours without updating
     while CI is not green, admins are told once (its own text) and it keeps waiting; the clock
@@ -72,3 +80,128 @@ set, so nothing in CI reaches live sources.
     delete `~/.local/state/<app>/update-failed`. A commit CI never runs on (`[skip ci]`,
     `paths-ignore`, a disabled workflow) is never installed by the automatic update; the 24-hour
     alert says so.
+
+## Process check
+
+`templates/.github/workflows/process.yml` runs `ops/process-check.mjs` on every push to `main`: do
+the pushed commits carry the trailers their changed files require? It catches a forgotten review,
+not a false claim. A red run means "review the open task", and it never holds back a server.
+
+Trailers go in the last paragraph of the commit message, before the attribution:
+
+```
+Ship-Task: add-export
+Ship-Tier: 2
+Ship-Reviews: code-reviewer
+Co-Authored-By: ...
+```
+
+A trailer anywhere else is not read, so it counts as missing and fails loudly. `Ship-Task` must match
+`^[a-z0-9-]+$`, and it is public once pushed: the same no-private-names rule as a commit subject.
+`Ship-Reviews` lists names separated by commas or spaces. A repeated trailer fails.
+
+### The rules
+
+- **Floor by path**, from `git diff-tree -r --no-renames --root`, so moving a trust file elsewhere
+  still counts its old path. Gitlinks are left out first. Floor 2: a file matches a `tier2` pattern
+  and no `tier0` pattern, or is added and matches `tier2New`. Floor 0: every file matches `tier0`.
+  Otherwise floor 1.
+- **Each commit with floor 1 or more** needs `Ship-Task` and a `Ship-Tier` at or above the floor. A
+  lower claim needs `Ship-Tier-Why: <reason>` and prints a notice: paths cannot see a comment-only
+  change or a rename, which are Tier 0.
+- **Each task in the range:** its highest tier decides the reviewers (`reviews` in the config), and
+  its last commit in the range must list them all in `Ship-Reviews`. Chunk commits omit the line. If
+  there is nothing left to fix, an `--allow-empty` commit closes the task.
+- **A task still open at the end of a push fails.** That is the case worth flagging: the server took
+  code before its review. The fix is to run the missing review and commit under the same slug. No
+  history rewrite, and the next push's range is judged on its own, so a mistake is red once.
+
+Why this shape: per commit would force chunk commits to lie, or a review before each commit. "Last
+commit of the push" would let a reviewed task cover an unreviewed one pushed with it.
+
+| Case | Treatment |
+|---|---|
+| Older than the check | Not checked. The boundary is the oldest commit that added `ops/process-check.json`, itself excluded, so re-adding it cannot move the start forward. |
+| No config at `after` | No workflow there either: pass. Workflow still there: fail. |
+| Merge commit | Not checked and counted; its parents are checked. Limit: conflict edits inside a merge are unseen. |
+| Gitlink-only bump | No trailers needed; any present are checked. A mixed commit is judged on its other files. |
+| Tier 0 by path | No trailers needed: docs and tests, including tests on trust paths. |
+| Owner commit | No automatic exemption. `Ship-Owner: <why>` passes with a notice and joins no task. Otherwise a red run, and the next session reviews the change. An absent attribution line is not the signal: if the harness ever stopped adding it, every commit would pass silently. |
+| Revert | No exemption: it is a change like any other. |
+| `before` is zeros | Checks boundary..after: the first push of a repo. |
+| `before` not found or not an ancestor (a force push) | Fail, `range unknown`. Never a silent pass. |
+| A shallow clone | Fail, `range unknown`: its boundary would be wrong. The workflow uses `fetch-depth: 0`. |
+
+Every run prints what it counted, for example `pass: checked 2, older 0, exempt 1 (gitlink), exempt
+0 (tier 0), owner 0, merges 0 not checked`, so a check that read an empty range shows it. It prints
+shas, fixed texts, validated slugs and config names, never commit text.
+
+### By hand
+
+- `node ops/process-check.mjs origin/main` at the end of a task, so CI is only the backstop.
+- `node ops/process-check.mjs --audit` (not in the workflow, no CI effect) reads boundary..HEAD and
+  prints tasks never closed, and counts: `audit: tasks 12, open 1, why 3, owner 1`. A task that
+  closed in a later push is not open. The setup review reads it, because a task closed in no push is
+  otherwise flagged by nothing after its one red run.
+
+### The config
+
+`ops/process-check.json` holds `tier2`, `tier2New`, `tier0`, `reviews` and `profileBullets`. Patterns
+are anchored at the repo root: `*` and `?` stay inside one folder, a `**` segment spans folders, and a
+trailing `/` means everything under that folder. Other glob syntax is refused, since it would
+silently match nothing. A config the script cannot use fails the run.
+
+It must agree with the trust-territory Paths list in `docs/agents.md`, and a test in the process job
+checks both ways. Each bullet, whitespace normalized, needs a `profileBullets` entry with its
+`patterns`, a `reason` (for example, a private folder CI cannot see), or both. So a bullet with no
+backticks is covered and a reworded bullet forces a look. Each `tier2` and `tier2New` pattern must
+belong to a bullet, and each pattern a bullet names must be enforced. The template's config matches
+the template's placeholder bullets, so filling in the profile means updating the config.
+
+`tier2New` is for paths where only a new file is Tier 2, such as a new page.
+
+### Why it cannot hold back a server
+
+A separate workflow is not enough. `ops/ci-status.sh` reads every check run of the commit, from every
+workflow, so a red process run alone would give `failure`, and a fast green one with CI not created
+yet would have given `success` for a commit CI never tested. So the script does two things:
+
+- It drops the check run named exactly `process-check` before the verdict. A run with no name, or any
+  other name, still counts, so the gate keeps failing safe. The page guard (more than 100 runs) uses
+  the unfiltered counts.
+- `success` needs a completed run named exactly `check`. A rename, an added workflow or missing CI
+  gives `pending` and the existing 24-hour alert.
+
+The second way a check can hold back a server is the normal suite, which CI and the server's version
+check both run. So `ops/process-check.test.mjs` stays out of it: `ops/` is in no test project there,
+and the process job runs the file by exact path (a glob that matches nothing passes with 0 tests).
+The files still go through the project's linter and formatter, like any file.
+
+What keeps this true: `ops/process-check.test.mjs` asserts the job id in `process.yml` equals the name
+in `ci-status.sh`, and that the job sets no `name:` (it would rename the check run). The gate's own
+tests (`ops/ci-status.test.mjs` in the templates; in a project they belong in the normal suite, so
+they run in the job the server waits on) assert `ci.yml` has a job `check` and nothing named
+`process-check`.
+
+### Adding it to a project
+
+Two pushes, in this order. The server runs its installed `ci-status.sh` against the new commit, so the
+filter only takes effect after an update:
+
+1. Push the new `ops/ci-status.sh` and its tests. After the server has updated, on the server
+   `grep -c process-check ops/ci-status.sh` prints 1.
+2. Only then push the workflow, script, tests and config, and add `.github/workflows/` and the
+   `ops/process-check` files to the profile's Paths.
+
+To undo, go the other way: remove the workflow, check the server, then revert the filter. With the
+filter gone and the job still running, a red process run holds the server back again.
+
+### Limits
+
+- Trailers are self-reported. This catches a forgotten review, not a false claim.
+- CI cannot see a private submodule's contents, so private code is unverified. A bump shows only as
+  a gitlink.
+- Reviewers that depend on whether a change is visible (UX, trust) are not required: "visible" is not
+  a path.
+- Deleting the workflow silences the check, and nothing inside it can detect that. The Paths list
+  makes the deletion Tier 2, and the setup review counts process runs.
