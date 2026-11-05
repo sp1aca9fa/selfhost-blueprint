@@ -1,1 +1,1 @@
-date,slug,tier,final_tier,builder_retries,checks_failures,fix_rounds,owner_stops,escape_of
+date,slug,tier,final_tier,builder_retries,checks_failures,fix_rounds,owner_stops,escape_of,builder_model,builder_effort
