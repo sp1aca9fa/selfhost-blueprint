@@ -3,11 +3,12 @@
 #
 #   ops/ci-status.sh <full 40-character commit sha>
 #
-#   success   the CI job's run (named exactly `check`) completed, and every counted run completed
-#             and concluded success, neutral or skipped
+#   success   the CI job's run (named exactly `check`) concluded success, and every counted run
+#             completed and concluded success, neutral or skipped
 #   failure   a completed counted run concluded anything else (failure, cancelled, timed out, ...)
-#   pending   a counted run is not completed yet, or the `check` run has not completed: none yet,
-#             or CI was renamed or removed (the 24-hour alert says so)
+#   pending   a counted run is not completed yet, or no `check` run concluded success: none yet, CI
+#             renamed or removed, or `check` skipped or neutral, which means CI did not test the
+#             commit (the 24-hour alert says so)
 #   unknown   no answer to trust: the remote is not github.com, the sha is not a full sha, curl
 #             failed, GitHub answered an error (a rate limit too) or something unreadable
 #
@@ -70,10 +71,11 @@ word="$(
         const valid = runs.every((r) => r && typeof r === "object" && typeof r.status === "string");
         if (valid) {
           const counted = runs.filter((r) => r.name !== PROCESS_JOB);
+          const tested = counted.some((r) => r.name === CI_JOB && r.conclusion === "success");
           if (counted.some((r) => r.status === "completed" && !ok.has(r.conclusion))) out = "failure";
           else if (counted.some((r) => r.status !== "completed")) out = "pending";
           else if (total > runs.length) out = "unknown";
-          else if (!counted.some((r) => r.name === CI_JOB)) out = "pending";
+          else if (!tested) out = "pending";
           else out = "success";
         }
       }

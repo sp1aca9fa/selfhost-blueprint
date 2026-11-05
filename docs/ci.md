@@ -46,10 +46,11 @@ set, so nothing in CI reaches live sources.
     used. The owner and repo come from
     `git remote get-url origin` (ssh or https github.com forms; anything else gives `unknown`).
   - One word per commit, over the counted runs (all but the process job, dropped by its exact
-    name): `success` (the run named exactly `check` completed, and every counted run completed,
-    each success, neutral or skipped), `failure` (a completed counted run with any other
-    conclusion), `pending` (a counted run not completed yet, or no completed `check`, with no time
-    limit: CI not started yet, or renamed or removed, which the 24-hour alert then reports),
+    name): `success` (the run named exactly `check` concluded success, and every counted run
+    completed, each success, neutral or skipped), `failure` (a completed counted run with any other
+    conclusion), `pending` (a counted run not completed yet, or no `check` that concluded success,
+    with no time limit: CI not started yet, renamed or removed, or `check` skipped or neutral, so CI
+    did not test the commit, which the 24-hour alert then reports),
     `unknown` (curl error, HTTP error or rate limit, unreadable answer, bad sha; also more runs
     than the page of 100 shows, counted before the process job is dropped, unless a visible
     counted run failed). The script never prints the API's answer.
@@ -169,8 +170,10 @@ yet would have given `success` for a commit CI never tested. So the script does 
 - It drops the check run named exactly `process-check` before the verdict. A run with no name, or any
   other name, still counts, so the gate keeps failing safe. The page guard (more than 100 runs) uses
   the unfiltered counts.
-- `success` needs a completed run named exactly `check`. A rename, an added workflow or missing CI
-  gives `pending` and the existing 24-hour alert.
+- `success` needs a run named exactly `check` that concluded `success`. A rename, an added workflow,
+  missing CI, or a `check` that concluded `skipped` or `neutral` (CI did not test the commit) gives
+  `pending` and the existing 24-hour alert. So `check` must have no job-level `if:`, which a test
+  asserts. Other runs keep the rule: skipped and neutral count as passed.
 
 The second way a check can hold back a server is the normal suite, which CI and the server's version
 check both run. So `ops/process-check.test.mjs` stays out of it: `ops/` is in no test project there,
@@ -191,7 +194,10 @@ filter only takes effect after an update:
 1. Push the new `ops/ci-status.sh` and its tests. After the server has updated, on the server
    `grep -c process-check ops/ci-status.sh` prints 1.
 2. Only then push the workflow, script, tests and config, and add `.github/workflows/` and the
-   `ops/process-check` files to the profile's Paths.
+   `ops/process-check` files to the profile's Paths. The script's failure message points at
+   `docs/ci.md`, so the project needs a short one with a "Process check" section. The script and its
+   test stay byte-identical to the templates, so a project whose linter does not declare Node's
+   `process` and `console` for `.mjs` files adds that for these two files.
 
 To undo, go the other way: remove the workflow, check the server, then revert the filter. With the
 filter gone and the job still running, a red process run holds the server back again.

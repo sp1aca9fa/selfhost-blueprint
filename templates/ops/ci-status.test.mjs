@@ -269,6 +269,49 @@ describe('ops/ci-status.sh and the process job', () => {
       [CHECK_GREEN, processRun('completed', 'success'), NAMELESS_FAILED],
       'failure',
     ],
+    // `check` skipped or neutral: CI did not test the commit, whatever else is green.
+    ['check skipped', [runOf('completed', 'skipped')], 'pending'],
+    ['check neutral', [runOf('completed', 'neutral')], 'pending'],
+    [
+      'check skipped, process green',
+      [runOf('completed', 'skipped'), processRun('completed', 'success')],
+      'pending',
+    ],
+    [
+      'check skipped, process red',
+      [runOf('completed', 'skipped'), processRun('completed', 'failure')],
+      'pending',
+    ],
+    [
+      'check neutral, process red',
+      [runOf('completed', 'neutral'), processRun('completed', 'failure')],
+      'pending',
+    ],
+    [
+      'check skipped, another job green',
+      [runOf('completed', 'skipped'), otherRun('completed', 'success')],
+      'pending',
+    ],
+    // Other runs keep their rule: skipped and neutral count as passed.
+    [
+      'check green, another job skipped',
+      [CHECK_GREEN, otherRun('completed', 'skipped')],
+      'success',
+    ],
+    [
+      'check green, another job neutral',
+      [CHECK_GREEN, otherRun('completed', 'neutral')],
+      'success',
+    ],
+    ['check green, process skipped', [CHECK_GREEN, processRun('completed', 'skipped')], 'success'],
+    ['check cancelled', [runOf('completed', 'cancelled')], 'failure'],
+    // Two runs named check (two workflows): one that really ran is enough, none is not.
+    ['one check green, one check skipped', [CHECK_GREEN, runOf('completed', 'skipped')], 'success'],
+    [
+      'one check skipped, one check neutral',
+      [runOf('completed', 'skipped'), runOf('completed', 'neutral')],
+      'pending',
+    ],
   ];
   for (const [title, runs, word] of rows) {
     it(`${title}: ${word}`, () => {
@@ -321,6 +364,18 @@ describe('ops/ci-status.sh and the process job', () => {
     expectWord('pending');
   });
 
+  it('skipped next to a green run of another name does not stand for CI', () => {
+    for (const name of ['Check', 'check ', 'checks']) {
+      answer([runOf('completed', 'skipped'), runOf('completed', 'success', name)]);
+      expectWord('pending');
+    }
+  });
+
+  it('more runs than the page shows beat a skipped check: unknown, never pending or success', () => {
+    answer([runOf('completed', 'skipped')], 2);
+    expectWord('unknown');
+  });
+
   it('a process run it cannot read leaves the verdict unknown', () => {
     answer([CHECK_GREEN, { id: 2, name: 'process-check', conclusion: 'failure' }]);
     expectWord('unknown');
@@ -336,5 +391,7 @@ describe('ops/ci-status.sh and the process job', () => {
     assert.match(ci, /^jobs:\n {2}check:$/m);
     assert.ok(!/^ {2}process-check:/m.test(ci));
     assert.ok(!/^\s+name:\s*process-check\s*$/m.test(ci));
+    // A job-level `if:` could conclude skipped, which the gate reads as CI not testing the commit.
+    assert.ok(!/^ {4}if:/m.test(ci));
   });
 });
