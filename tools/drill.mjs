@@ -1479,12 +1479,18 @@ export function compareBatches(rows, a, b) {
     const differs = ['model', 'effort', 'agent_text', 'context_text'].filter((k) => ra[k] !== rb[k]);
     const label = differs.length > 0 ? ` [differs: ${differs.join(', ')}]` : '';
     const side = (r, n) => `${r.model} ${r.effort} ${n} of ${r.planted}`;
+    // A blank arises only on a doubtful miss, so a resume re-draws misses and never catches: a
+    // resumed score can read high, and must never pass for an improvement unmarked.
+    const redrawn = rows.some(
+      (r) => (r.batch === a || r.batch === b) && r.case === id && r.caught === '',
+    );
     lines.push(
-      `${id} ${ra.reviewer}: ${side(ra, ca)}, ${side(rb, cb)}${trend(ca, cb)}${label}${sameCase ? '' : ' [case changed: not in the totals]'}`,
+      `${id} ${ra.reviewer}: ${side(ra, ca)}, ${side(rb, cb)}${trend(ca, cb)}${label}${redrawn ? ' [resumed]' : ''}${sameCase ? '' : ' [case changed: not in the totals]'}`,
     );
     if (!sameCase) continue;
     comparable += 1;
-    const t = totals.get(ra.reviewer) ?? { a: 0, b: 0, plantedA: 0, plantedB: 0, n: 0 };
+    const t = totals.get(ra.reviewer) ?? { a: 0, b: 0, plantedA: 0, plantedB: 0, n: 0, resumed: 0 };
+    if (redrawn) t.resumed += 1;
     t.a += ca;
     t.b += cb;
     t.plantedA += Number(ra.planted);
@@ -1494,7 +1500,7 @@ export function compareBatches(rows, a, b) {
   }
   for (const [reviewer, t] of totals) {
     lines.push(
-      `${reviewer}: ${t.a} of ${t.plantedA}, then ${t.b} of ${t.plantedB}, n=${t.n}${trend(t.a, t.b)}`,
+      `${reviewer}: ${t.a} of ${t.plantedA}, then ${t.b} of ${t.plantedB}, n=${t.n}${trend(t.a, t.b)}${t.resumed > 0 ? `, resumed ${t.resumed}: may read high` : ''}`,
     );
   }
   if (comparable < 3) lines.push('fewer than 3 cases in common: too few to read as a change');

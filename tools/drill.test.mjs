@@ -2921,6 +2921,27 @@ test('compare: only cases scored in both, per case and per reviewer, and it says
   assert.ok(!text.includes('3 of 3'), 'groups are never summed');
 });
 
+test('compare: a case re-drawn by a resume is marked, on its line and in the totals', () => {
+  const rows = [
+    row('a', 's1', 0),
+    row('a', 's2', 1),
+    row('b', 's1', ''),
+    row('b', 's1', 1),
+    row('b', 's2', 1),
+  ];
+  const text = compareBatches(rows, 'a', 'b').lines.join('\n');
+  assert.match(text, /^s1 code-reviewer: .*\(higher\) \[resumed\]$/m);
+  assert.match(text, /^s2 code-reviewer: (?!.*\[resumed\])/m);
+  assert.match(text, /code-reviewer: 1 of 2, then 2 of 2, n=2 \(higher\), resumed 1: may read high/);
+  const plain = compareBatches([row('a', 's1', 0), row('b', 's1', 1)], 'a', 'b').lines.join('\n');
+  assert.ok(!plain.includes('resumed'), 'no mark without a blank in either batch');
+  const other = [row('c', 's1', ''), row('a', 's1', 0), row('b', 's1', 1)];
+  assert.ok(
+    !compareBatches(other, 'a', 'b').lines.join('\n').includes('resumed'),
+    'a blank in some other batch is not a resume of these',
+  );
+});
+
 test('compare: a pair differing in model, effort or a text is labeled and stays in the totals', () => {
   for (const [column, value, shown] of [
     ['model', 'claude-sonnet-9-9', 'model'],
