@@ -312,7 +312,15 @@ describe('range and boundary', () => {
 
   test('wrong arguments: usage, exit 2', (t) => {
     const repo = makeRepo(t);
-    for (const args of [[], ['a', 'b', 'c'], ['--audit', 'a', 'b']]) {
+    for (const args of [
+      [],
+      ['a', 'b', 'c'],
+      ['--audit', 'a', 'b'],
+      ['--audit', '--reviewed'],
+      ['--audit', '--reviewed', ''],
+      ['--audit', 'a', 'b', '--reviewed', 'x'],
+      ['HEAD', 'HEAD', '--reviewed', 'x'],
+    ]) {
       const r = repo.run(...args);
       assert.equal(r.status, 2);
       assert.match(r.err, /usage/);
@@ -762,7 +770,7 @@ describe('--audit', () => {
     );
     repo.change('packages/core/a.ts', message('Mine', 'Ship-Owner: urgent'));
     const r = repo.run('--audit');
-    passes(r, 'open 1, unclaimed 0, why 1, owner 1');
+    passes(r, 'open 1, unclaimed 0, unreviewed 0, why 1, owner 1');
     hasLine(r.out, 'task never-closed open');
     assert.match(r.out, /audit: tasks 2,/);
   });
@@ -771,7 +779,7 @@ describe('--audit', () => {
     const repo = makeRepo(t);
     repo.change('packages/core/a.ts', chunk('feature'));
     repo.commit(message('Close', 'Ship-Task: feature', 'Ship-Reviews: code-reviewer'));
-    passes(repo.run('--audit'), 'open 0, unclaimed 0, why 0, owner 0');
+    passes(repo.run('--audit'), 'open 0, unclaimed 0, unreviewed 0, why 0, owner 0');
   });
 
   test('a task closed with the wrong reviewer is open, by its whole-history tier', (t) => {
@@ -789,7 +797,10 @@ describe('--audit', () => {
     repo.commit(chunk('before-the-check'));
     repo.write('ops/process-check.json', `${JSON.stringify(CONFIG)}\n`);
     repo.commit('Add the config');
-    passes(repo.run('--audit'), 'audit: tasks 0, open 0, unclaimed 0, why 0, owner 0');
+    passes(
+      repo.run('--audit'),
+      'audit: tasks 0, open 0, unclaimed 0, unreviewed 0, why 0, owner 0',
+    );
   });
 
   test('a merge is not read, whatever its message says', (t) => {
@@ -799,7 +810,10 @@ describe('--audit', () => {
     repo.git(['checkout', '--quiet', 'main']);
     const text = message('Merge', 'Ship-Task: in-a-merge', 'Ship-Tier: 2', 'Ship-Tier-Why: x');
     repo.git(['merge', '--quiet', '--no-ff', '-m', text, 'side']);
-    passes(repo.run('--audit'), 'audit: tasks 0, open 0, unclaimed 0, why 0, owner 0');
+    passes(
+      repo.run('--audit'),
+      'audit: tasks 0, open 0, unclaimed 0, unreviewed 0, why 0, owner 0',
+    );
   });
 
   test('no config: says so, exit 0', (t) => {
@@ -820,8 +834,9 @@ describe('--audit', () => {
     repo.change('src/glue.ts', closed('fine', 1, 'code-reviewer-light'));
     const low = repo.change('packages/core/a.ts', chunk('low', 1));
     const r = repo.run('--audit');
-    passes(r, 'audit: tasks 2, open 1, unclaimed 2, why 0, owner 0');
+    passes(r, 'audit: tasks 2, open 1, unclaimed 2, unreviewed 2, why 0, owner 0');
     hasLine(r.out, `unclaimed 2: ${short(bare)} ${short(low)}`);
+    hasLine(r.out, `unreviewed 2: ${short(bare)} ${short(low)}`);
   });
 
   test('no failure prints no unclaimed list', (t) => {
@@ -830,6 +845,130 @@ describe('--audit', () => {
     const r = repo.run('--audit');
     passes(r, 'unclaimed 0');
     assert.ok(!r.out.includes('unclaimed 0:'), r.out);
+    assert.ok(!r.out.includes('unreviewed 0:'), r.out);
+  });
+});
+
+describe('--audit --reviewed', () => {
+  // The file sits beside the checkout's own files and is never committed: the audit reads revisions.
+  const auditWith = (repo, text) => {
+    if (text !== undefined) writeFileSync(join(repo.dir, 'reviewed.txt'), text);
+    return repo.run('--audit', '--reviewed', 'reviewed.txt');
+  };
+
+  test('prints unclaimed and unreviewed, with the shas not listed; exit 0', (t) => {
+    const repo = makeRepo(t);
+    const one = repo.change('packages/core/a.ts');
+    const two = repo.change('packages/core/a.ts');
+    const r = auditWith(repo, `${one}\n`);
+    passes(r, 'unclaimed 2, unreviewed 1,');
+    hasLine(r.out, `unclaimed 2: ${short(one)} ${short(two)}`);
+    hasLine(r.out, `unreviewed 1: ${short(two)}`);
+    assert.ok(!r.out.includes(`unreviewed 1: ${short(one)}`), r.out);
+  });
+
+  test('every sha listed: nothing open', (t) => {
+    const repo = makeRepo(t);
+    const one = repo.change('packages/core/a.ts');
+    const two = repo.change('packages/core/a.ts');
+    const r = auditWith(repo, `${one}\n${two}\n`);
+    passes(r, 'unclaimed 2, unreviewed 0,');
+    assert.ok(!r.out.includes('unreviewed 0:'), r.out);
+  });
+
+  test('a missing file, and an empty one, list nothing: every unclaimed sha counts', (t) => {
+    const repo = makeRepo(t);
+    repo.change('packages/core/a.ts');
+    passes(repo.run('--audit', '--reviewed', 'absent.txt'), 'unclaimed 1, unreviewed 1,');
+    passes(auditWith(repo, ''), 'unclaimed 1, unreviewed 1,');
+    passes(auditWith(repo, '\n\n'), 'unclaimed 1, unreviewed 1,');
+  });
+
+  test('any sha length from 7, blank lines and a CRLF file read the same', (t) => {
+    const repo = makeRepo(t);
+    const one = repo.change('packages/core/a.ts');
+    for (const line of [one, short(one), one.slice(0, 7)]) {
+      passes(auditWith(repo, `\n${line}\r\n\n`), 'unreviewed 0,');
+    }
+  });
+
+  test('a sha of another commit, or one that only shares a few digits, lists nothing', (t) => {
+    const repo = makeRepo(t);
+    const one = repo.change('packages/core/a.ts');
+    const notAt = (i) => (one[i] === 'a' ? 'b' : 'a');
+    passes(auditWith(repo, `${notAt(0).repeat(40)}\n`), 'unreviewed 1,');
+    passes(auditWith(repo, `${one.slice(0, 7)}${notAt(7)}\n`), 'unreviewed 1,');
+  });
+
+  test('a line that is not a sha fails, naming the line, and is never skipped', (t) => {
+    const repo = makeRepo(t);
+    const one = repo.change('packages/core/a.ts');
+    for (const [text, line] of [
+      [`${one}\nnot a sha\n`, 2],
+      [`abc123\n`, 1],
+      [`${one.toUpperCase()}\n`, 1],
+      [`${one} looked at it\n`, 1],
+      [`${'a'.repeat(41)}\n`, 1],
+    ]) {
+      const r = auditWith(repo, text);
+      assert.equal(r.status, 1, text);
+      assert.match(
+        r.out,
+        new RegExp(`^fail: reviewed\\.txt: line ${line} is not a sha$`, 'm'),
+        text,
+      );
+    }
+  });
+
+  test('a path that cannot be read fails', (t) => {
+    const repo = makeRepo(t);
+    repo.change('packages/core/a.ts');
+    const r = repo.run('--audit', '--reviewed', 'packages');
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /^fail: packages: could not be read$/m);
+  });
+
+  test('takes a revision on either side of the flag', (t) => {
+    const repo = makeRepo(t);
+    const one = repo.change('packages/core/a.ts');
+    repo.change('packages/core/a.ts');
+    passes(repo.run('--audit', '--reviewed', 'absent.txt', one), 'unclaimed 1, unreviewed 1,');
+    passes(repo.run('--audit', one, '--reviewed', 'absent.txt'), 'unclaimed 1, unreviewed 1,');
+  });
+
+  test('a push check takes no such flag, and the audit needs no file', (t) => {
+    const repo = makeRepo(t);
+    repo.change('packages/core/a.ts');
+    assert.equal(repo.run(ZEROS, '--reviewed', 'x').status, 2);
+    passes(repo.run('--audit'), 'unclaimed 1, unreviewed 1,');
+  });
+
+  test('a new unreviewed commit plus a config change: a count would not move, the shas do', (t) => {
+    const repo = makeRepo(t);
+    const old = repo.change('src/glue.ts', chunk('old-low', 0));
+    passes(auditWith(repo, `${old}\n`), 'unclaimed 1, unreviewed 0,');
+    // The config stops failing the old commit, and a new one fails: still one unclaimed.
+    const relaxed = { ...CONFIG, tier0: [...CONFIG.tier0, 'src/'] };
+    repo.write('ops/process-check.json', `${JSON.stringify(relaxed)}\n`);
+    repo.commit(closed('relax'));
+    const fresh = repo.change('packages/core/b.ts');
+    const r = auditWith(repo);
+    passes(r, 'unclaimed 1, unreviewed 1,');
+    hasLine(r.out, `unclaimed 1: ${short(fresh)}`);
+    hasLine(r.out, `unreviewed 1: ${short(fresh)}`);
+  });
+
+  test('a config tightening makes a reviewed task read unclaimed, until it is looked at', (t) => {
+    const repo = makeRepo(t);
+    const done = repo.change('src/glue.ts', closed('fine', 1, 'code-reviewer-light'));
+    passes(auditWith(repo, ''), 'unclaimed 0, unreviewed 0,');
+    const tighter = { ...CONFIG, tier2: [...CONFIG.tier2, 'src/'] };
+    repo.write('ops/process-check.json', `${JSON.stringify(tighter)}\n`);
+    repo.commit(closed('tighten'));
+    const before = auditWith(repo);
+    passes(before, 'unclaimed 1, unreviewed 1,');
+    hasLine(before.out, `unreviewed 1: ${short(done)}`);
+    passes(auditWith(repo, `${done}\n`), 'unclaimed 1, unreviewed 0,');
   });
 });
 

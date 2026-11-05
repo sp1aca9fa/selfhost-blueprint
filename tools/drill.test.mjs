@@ -27,6 +27,9 @@ import {
   buildPrompt,
   caseProblems,
   checkBoundary,
+  holdToBatchModel,
+  isBareGitRead,
+  resumePlan,
   checkClone,
   compareBatches,
   createWorkspace,
@@ -52,7 +55,7 @@ import {
   validateCase,
   windowProblems,
 } from './drill.mjs';
-import { buildView, caseHash, contextHash, hashParts } from './setup-view.mjs';
+import { agentTextHash, buildView, caseHash, contextHash } from './setup-view.mjs';
 
 const DRILL = join(dirname(fileURLToPath(import.meta.url)), 'drill.mjs');
 const TODAY = '2030-01-02';
@@ -334,6 +337,7 @@ if (m) {
   if (mode === 'deny-allowed') denials.push(bash('git show HEAD:README.md'), deniedRead);
   if (mode === 'deny-show') denials.push(bash('git show HEAD:README.md'));
   if (mode === 'deny-read') denials.push(deniedRead);
+  if (mode === 'piped-denied') denials.push(bash('git log --oneline -1 | cat'));
   const readme = fs.readFileSync('README.md', 'utf8').trim();
   let answer = 'Outside refused. Inside: ' + readme + '\\nGLOBAL-RULES: no';
   if (mode === 'deny-allowed' || mode === 'no-quote') answer = 'All refused.\\nGLOBAL-RULES: no';
@@ -411,6 +415,29 @@ function runCli(fx, fake, batch, extra = []) {
       '--ledger-dir',
       fx.ledgerDir,
       '--batch',
+      batch,
+      '--agents-dir',
+      fx.agentsDir,
+      '--claude',
+      fake.bin,
+      ...extra,
+    ],
+    { encoding: 'utf8', env: { ...process.env, FAKE_CLAUDE_DIR: fake.dir } },
+  );
+  return { status: r.status, out: r.stdout, err: r.stderr };
+}
+
+function resumeCli(fx, fake, batch, extra = []) {
+  const r = spawnSync(
+    process.execPath,
+    [
+      DRILL,
+      'run',
+      '--repo',
+      fx.repo,
+      '--ledger-dir',
+      fx.ledgerDir,
+      '--resume',
       batch,
       '--agents-dir',
       fx.agentsDir,
@@ -524,16 +551,11 @@ test('parser: a line that starts like a finding without file:line is malformed, 
   }
 });
 
-test('parser: a malformed line counts as located only with a file or line token', () => {
+test('parser: every malformed line is kept, and says if the line itself opens with a tag', () => {
   for (const line of [
     '[fix] src/a.ts: no line number',
     '[bug] src/a.ts:0: line zero',
     '[bug] src/a.ts:12abc: not a number',
-    '[note] src/a.ts:12: an unknown tag on a location',
-    '- src/a.ts:12: a location with no tag',
-    '### src/a.ts:12',
-    '**Bug** src/a.ts:12: a tag with no brackets',
-    '| [bug] | src/a.ts:12 | a table row |',
     '[bug] packages/x/src/y.ts line 120: a line in words',
     '[bug] packages/x/src/y.ts(120): a line in brackets',
     '[bug] y.ts L120: a line in another style',
@@ -541,22 +563,30 @@ test('parser: a malformed line counts as located only with a file or line token'
     '[bug] the caller at L120 reads it late',
     '[bug] the caller (120) reads it late',
     '[bug] in the helpers folder src/price the round is off',
-  ]) {
-    const { malformed, located } = parseFindings(line);
-    assert.equal(malformed, 1, line);
-    assert.equal(located, 1, line);
-  }
-  for (const line of [
     '[bug] no location given',
     '[bug]',
+    '- **[fix]** a bullet and bold around it',
+    '[ask] should this wait for the next release?',
+  ]) {
+    const { malformed, slips, findings } = parseFindings(line);
+    assert.equal(malformed, 1, line);
+    assert.equal(slips.length, 1, line);
+    assert.equal(slips[0].opensWithTag, true, line);
+    assert.equal(findings.length, 0, line);
+  }
+  for (const line of [
+    '[note] src/a.ts:12: an unknown tag on a location',
+    '- src/a.ts:12: a location with no tag',
+    '### src/a.ts:12',
+    '**Bug** src/a.ts:12: a tag with no brackets',
+    '| [bug] | src/a.ts:12 | a table row |',
     'See the [fix] finding above.',
     'No [bug] found.',
     'No [bug] here, e.g. in the rounding, i.e. nowhere.',
-    '[ask] should this wait for the next release?',
   ]) {
-    const { malformed, located } = parseFindings(line);
+    const { malformed, slips } = parseFindings(line);
     assert.equal(malformed, 1, line);
-    assert.equal(located, 0, line);
+    assert.equal(slips[0].opensWithTag, false, line);
   }
 });
 
@@ -570,7 +600,7 @@ test('parser: prose and odd input are neither findings nor malformed', () => {
     undefined,
     42,
   ]) {
-    assert.deepEqual(parseFindings(input), { findings: [], malformed: 0, located: 0 });
+    assert.deepEqual(parseFindings(input), { findings: [], malformed: 0, slips: [] });
   }
 });
 
@@ -661,71 +691,133 @@ test('scoreRun: no findings at all is a real zero, because the answer is complet
   assert.equal(r.caught, 0);
 });
 
-test('scoreRun: a miss is believed only when every location could be read', () => {
-  const blank = (answer, reason, extra) => {
-    const r = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), extra));
+const FINDING_DOUBT = "a finding's path could be a file with a bug, written another way";
+const SLIP_DOUBT = 'a location that could not be read could be a file with a bug';
+const NO_FILE_DOUBT = 'a tagged line names no file';
+
+test('scoreRun: an unreadable location that could be a window file leaves it blank', () => {
+  const bugs = [{ id: 'b1', windows: [{ file: 'packages/x/src/y.ts', from: 118, to: 131 }] }];
+  const files = ['packages/x/src/y.ts', 'packages/x/src/z.ts', '.agent-runs/spec.md'];
+  const blank = (answer, reason, extra = {}) => {
+    const r = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), { bugs, files, ...extra }));
     assert.equal(r.scored, false, answer);
     assert.deepEqual(r.reasons, [reason], answer);
     assert.equal(r.caught, undefined, answer);
     assert.equal(r.model, 'claude-opus-9-9', answer);
   };
-  const unread = 'a finding has a location that could not be read';
-  const elsewhere = 'a finding names a path not in the reviewed tree';
-  blank('[bug] src/a.ts line 11: x', unread);
-  blank('[bug] src/a.ts(11): x', unread);
-  blank('[bug] a.ts:11: only the base name', elsewhere);
-  blank('[bug] a/a.ts:11: not a real diff prefix', elsewhere);
-  blank('[bug] src/gone.ts:11: x', elsewhere);
-  blank('[bug] src/a.ts:1: x', 'no file list to check the findings against', { files: undefined });
-  blank('[bug] src/a.ts:1: x', 'no file list to check the findings against', { files: null });
+  // A finding whose path is a part of the window's path, or its base name.
+  blank('[bug] src/y.ts:120: x', FINDING_DOUBT);
+  blank('[bug] y.ts:120: x', FINDING_DOUBT);
+  blank('[bug] x/src/y.ts:120: x', FINDING_DOUBT);
+  blank('[bug] a/y.ts:120: not the diff prefix of the real path', FINDING_DOUBT);
+  blank('[bug] ./src/y.ts:120: x', FINDING_DOUBT);
+  // The whole path under another prefix.
+  blank('[bug] /elsewhere/packages/x/src/y.ts:120: x', FINDING_DOUBT);
+  // Any window of any bug, not only the first.
+  const spread = [
+    {
+      id: 'b1',
+      windows: [
+        { file: 'packages/x/src/y.ts', from: 118, to: 131 },
+        { file: 'packages/x/src/caller.ts', from: 5, to: 6 },
+      ],
+    },
+    { id: 'b2', windows: [{ file: 'packages/q/later.ts', from: 1, to: 2 }] },
+  ];
+  blank('[bug] caller.ts:120: the second window', FINDING_DOUBT, { bugs: spread });
+  blank('[bug] later.ts:120: the second bug', FINDING_DOUBT, { bugs: spread });
+  // With no list nothing is ruled out, and the rule still holds.
+  blank('[bug] src/y.ts:120: x', FINDING_DOUBT, { files: undefined });
+  // A malformed line naming such a file, in any form.
+  blank('[bug] packages/x/src/y.ts line 120: x', SLIP_DOUBT);
+  blank('[bug] packages/x/src/y.ts(120): x', SLIP_DOUBT);
+  blank('[bug] y.ts around 120: x', SLIP_DOUBT);
+  blank('[bug] src/y.ts: no line at all', SLIP_DOUBT);
+  blank('src/y.ts:120', SLIP_DOUBT);
+  blank('packages/x/src/y.ts:120 with no tag', SLIP_DOUBT);
+  blank('| [bug] | packages/x/src/y.ts:120 | a table row |', SLIP_DOUBT);
+  blank('The [fix] above also applies to y.ts.', SLIP_DOUBT);
+  // A tagged line with no file at all could be about anything.
+  blank('[bug] no location given', NO_FILE_DOUBT);
+  blank('[bug]', NO_FILE_DOUBT);
+  blank('[bug] the caller at line 120 reads it late', NO_FILE_DOUBT);
+  blank('[ask] should this wait for the next release?', NO_FILE_DOUBT);
+  blank('[bug] no file here, e.g. in the rounding, i.e. nowhere.', NO_FILE_DOUBT);
 
+  // The reason carries no file or window, whatever the finding held.
+  for (const answer of ['[bug] y.ts:120: x', '[bug] y.ts line 120: x', '[bug] none named']) {
+    const quiet = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), { bugs, files }));
+    assert.equal(quiet.scored, false, answer);
+    assert.ok(!/y\.ts|src|118|131/.test(quiet.reasons.join(' ')), answer);
+  }
+});
+
+test('scoreRun: an ordinary miss stands, so doubt cannot lift recall', () => {
+  const bugs = [{ id: 'b1', windows: [{ file: 'packages/x/src/y.ts', from: 118, to: 131 }] }];
+  const files = ['packages/x/src/y.ts', 'packages/x/src/z.ts', '.agent-runs/spec.md'];
+  const zero = (answer, extra = {}) => {
+    const r = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), { bugs, files, ...extra }));
+    assert.deepEqual(r.reasons, [], answer);
+    assert.equal(r.scored, true, answer);
+    assert.equal(r.caught, 0, answer);
+  };
+  // The reviewers' own list.
+  zero('[fix] packages/x/src/z.test.ts:1: add a test');
+  zero('[ask] private/ops/claude-rules.md:3: is this rule meant here?');
+  zero('No [bug] found in packages/x/src/z.ts.');
+  zero('ops/update-server.sh:302 is where a wrapped sentence went on.');
+  zero('| [bug] | packages/x/src/z.ts:3 | other |');
+  zero('packages/x/z.test.ts:12:3 expected 1');
+  zero('The [fix] above also applies to z.ts.');
+  zero('[fix] tools/other.test.mjs: no test');
+  // And what else belongs with them.
+  zero('Nothing to report.');
+  zero('No [bug] found.');
+  zero('See the [fix] finding above.');
+  zero('[bug] packages/x/src/y.ts:1: the right file, outside the window');
+  zero('[bug] a/packages/x/src/y.ts:1: a diff prefix on the right file');
+  zero('[bug] packages/x/src/y.ts:1-5000: a wide finding on the right file reads as a miss');
+  zero('[bug] other/y.ts:1: same base name, another folder');
+  zero('[bug] gone.ts:1: a path nothing resembles');
+  // A name that only ends the same is another file.
+  zero('[bug] y.ts:1: not zy.ts', {
+    bugs: [{ id: 'b1', windows: [{ file: 'packages/x/src/zy.ts', from: 118, to: 131 }] }],
+  });
+  // A tagged line naming a file with no extension does name a file.
+  zero('[ask] ops/Makefile has no line for this');
+  zero('[bug] gone.ts:1: with no list either', { files: undefined });
+  zero('Nothing to report.', { files: undefined });
+  zero('Nothing to report.', { files: [] });
+  // A file of the tree that only looks like a window file is that other file.
+  zero('[bug] src/y.ts:1: a real file of its own', { files: [...files, 'src/y.ts'] });
+  zero('[bug] src/y.ts line 1: a real file of its own', { files: [...files, 'src/y.ts'] });
+});
+
+test('scoreRun: every bug caught needs no more proof, and one of two does', () => {
+  const two = [
+    { id: 'b1', windows: [{ file: 'src/a.ts', from: 10, to: 12 }] },
+    { id: 'b2', windows: [{ file: 'src/a.ts', from: 40, to: 42 }] },
+  ];
   // One bug of two caught: the other may be behind the unreadable line.
-  const two = [{ id: 'b1', windows: [{ file: 'src/a.ts', from: 10, to: 12 }] },
-    { id: 'b2', windows: [{ file: 'src/a.ts', from: 40, to: 42 }] }];
   const partly = scoreRun(
     scoreInput(reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts line 41: y\n${WIN}`), { bugs: two }),
   );
   assert.equal(partly.scored, false);
-  assert.deepEqual(partly.reasons, [unread]);
-  // Both caught: nothing to doubt.
+  assert.deepEqual(partly.reasons, [SLIP_DOUBT]);
   const both = scoreRun(
     scoreInput(
-      reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts:41: y\n[bug] src/a.ts line 41: z\n${WIN}`),
+      reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts:41: y\n[bug] src/a.ts line 41: z\n[bug] a.ts:1: w\n${WIN}`),
       { bugs: two },
     ),
   );
   assert.equal(both.scored, true);
   assert.equal(both.caught, 2);
-
-  // The reason carries no file or window, whatever the finding held.
-  const quiet = scoreRun(scoreInput(reply(`[bug] secret-name.ts:11: x\n${WIN}`)));
-  assert.ok(!quiet.reasons.join(' ').includes('secret-name'));
-  assert.ok(!quiet.reasons.join(' ').includes('src/a.ts'));
+  assert.equal(both.malformed, 1);
 });
 
-test('scoreRun: what does not cast doubt on a miss', () => {
-  const zero = (answer, extra) => {
-    const r = scoreRun(scoreInput(reply(`${answer}\n${WIN}`), extra));
-    assert.equal(r.scored, true, answer);
-    assert.equal(r.caught, 0, answer);
-  };
-  zero('Nothing to report.');
-  zero('No [bug] found.');
-  zero('[bug] no location given');
-  zero('[bug] src/a.ts:1: outside the window, a real file');
-  zero('[bug] a/src/a.ts:1: a diff prefix on a real file');
-  zero('[ask] .agent-runs/2030-01-02-change/spec.md:3: about the spec');
-  zero('[bug] src/a.ts:1-5000: a wide finding on a real file reads as a miss');
-  zero('Nothing to report.', { files: undefined });
-  zero('Nothing to report.', { files: [] });
-
-  // Every bug caught: the odd line beside it changes nothing.
-  const full = scoreRun(
-    scoreInput(reply(`[bug] src/a.ts:11: x\n[bug] src/a.ts line 11: y\n[bug] gone.ts:1: z\n${WIN}`)),
-  );
-  assert.equal(full.scored, true);
-  assert.equal(full.caught, 1);
-  assert.equal(full.malformed, 1);
+test('scoreRun: all three doubts are reported together', () => {
+  const r = scoreRun(scoreInput(reply(`[bug] a.ts:1: x\n[bug] src/a.ts line 11: y\n[bug] none\n${WIN}`)));
+  assert.deepEqual(r.reasons, [FINDING_DOUBT, SLIP_DOUBT, NO_FILE_DOUBT]);
 });
 
 test('scoreRun: a denied look at the change unscores, a denial by the deny list does not', () => {
@@ -735,17 +827,43 @@ test('scoreRun: a denied look at the change unscores, a denial by the deny list 
   for (const command of [
     'git diff a..b',
     'git diff',
+    'git diff aaa..bbb',
     'git log --oneline a..b',
     'git show b',
     '  git show b:src/a.ts',
-    'git --no-pager diff a..b',
-    'git -C /tmp/rv-x/repo log -3',
-    'git -c core.pager=cat show b',
-    'git diff a..b | head -n 50',
+    'git diff a..b\n',
   ]) {
+    assert.equal(isBareGitRead(command), true, command);
     const r = score(bash(command));
     assert.equal(r.scored, false, command);
     assert.deepEqual(r.reasons, ['a required read was denied'], command);
+  }
+  // Piped, chained, redirected or with a global option: the allowlist's doing, and a reviewer retries.
+  // None of these stops a paid batch, with the bug caught or not.
+  for (const command of [
+    'git diff a..b | head -200',
+    'git log --oneline -5 | cat',
+    'git diff a..b 2>&1',
+    'git diff a..b --stat && git log -1',
+    'git diff a..b; git log -1',
+    'git log -1 > out.txt',
+    'git diff `cat x`',
+    'git diff a..b\ngit log -1',
+    'git --no-pager diff a..b',
+    'git -c core.pager=cat log -3',
+    'git -C /x diff a..b',
+    'git diff-tree -r a b',
+    'git show-ref',
+    'git  diff a..b',
+    'gitdiff a..b',
+  ]) {
+    assert.equal(isBareGitRead(command), false, command);
+    assert.equal(score(bash(command)).scored, true, command);
+    const missed = scoreRun(
+      scoreInput(reply(`Nothing to report.\n${WIN}`, { permission_denials: [bash(command)] })),
+    );
+    assert.equal(missed.scored, true, command);
+    assert.equal(missed.caught, 0, command);
   }
   for (const command of [
     'git diff --no-index -- /etc/hosts README.md',
@@ -1633,9 +1751,9 @@ test('run: the ledger row, the raw output and the clean-up', () => {
   assert.equal(row.batch_cases, '1');
   assert.equal(row.malformed, '0');
   assert.match(row.date, /^\d{4}-\d{2}-\d{2}$/);
-  // `agent_text` is the reviewer's own file. The rest around it is `context_text`, and the case is
-  // `case_hash`: three hashes, the same way the global view reads them.
-  assert.equal(row.agent_text, hashParts([AGENT_TEXT]));
+  // `agent_text` is the reviewer's own file and the profile's domain checklist. The rest around it is
+  // `context_text`, and the case is `case_hash`: three hashes, the same way the global view reads them.
+  assert.equal(row.agent_text, agentTextHash(AGENT_TEXT, PROFILE));
   assert.equal(row.context_text, contextHash(PROFILE, textsOf(fx)['CLAUDE.md'], ''));
   assert.equal(row.case_hash, caseHash(join(fx.ledgerDir, 'drills', 's01')));
 
@@ -1666,7 +1784,7 @@ test('run: the ledger row, the raw output and the clean-up', () => {
   assert.equal(existsSync(join(fx.repo, 'vault', 'ops', 'drills', 's01', 'case.json')), true);
 });
 
-test('run: meta.json records the file list a rescore checks findings against', () => {
+test('run: meta.json records the file list a rescore rules findings out with', () => {
   const fx = makeFixture();
   const fake = makeFake();
   fake.queue(canned(inWindow()));
@@ -1679,17 +1797,42 @@ test('run: meta.json records the file list a rescore checks findings against', (
   assert.ok(!meta.files.some((f) => f.startsWith('vault/ops')), 'nothing private');
 });
 
-test('run: a finding with a path not in the tree leaves the row blank and stops the batch', () => {
+test('run: a finding that could be the bug in another form leaves the row blank and stops the batch', () => {
   const fx = makeFixture();
   addReplay(fx, 's02');
   const fake = makeFake();
   fake.queue(canned(`[bug] price.mjs:8: the base name only\n${WIN}`), canned(inWindow()));
   const r = runCli(fx, fake, 'one');
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /s01: caught blank \(a finding names a path not in the reviewed tree\)/);
+  assert.match(r.out, /s01: caught blank \(a finding's path could be a file with a bug/);
   assert.equal(rowsOf(fx).length, 1);
   assert.equal(rowsOf(fx)[0].caught, '');
   assert.equal(fake.reviews().length, 1);
+});
+
+test('run: a finding on a path not in the tree is an ordinary miss', () => {
+  const fx = makeFixture();
+  const fake = makeFake();
+  fake.queue(canned(`[fix] src/new-helper.test.mjs:1: add a test\n${WIN}`));
+  const r = runCli(fx, fake, 'one');
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /s01: caught 0, other 1/);
+});
+
+test('run: a file the tree holds, resembling a window file, is ruled out by the recorded list', () => {
+  const fx = makeFixture();
+  const fake = makeFake();
+  // `src/price.mjs` is the window. `price.mjs` would be in doubt, unless the tree holds one.
+  fake.queue(canned(`[bug] price.mjs:8: the base name only\n${WIN}`));
+  runCli(fx, fake, 'one');
+  const raw = rawFolder(fx, 'one', 's01');
+  const meta = JSON.parse(readFileSync(join(raw, 'meta.json'), 'utf8'));
+  writeFileSync(join(raw, 'meta.json'), JSON.stringify({ ...meta, files: [...meta.files, 'price.mjs'] }));
+  const r = spawnSync(process.execPath, [DRILL, 'score', '--ledger-dir', fx.ledgerDir, '--raw', raw], {
+    encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /s01: caught 0, other 1/);
 });
 
 test('reviewed files: a file the change deletes can be named, so a miss stays a miss', () => {
@@ -2130,6 +2273,338 @@ test('run: the row is one the global view reads, and it matches the current text
   assert.deepEqual(text, { reviewer: 'code-reviewer', current: true, scored: 1, planned: 1 });
 });
 
+// --- Resuming a batch ---
+
+// Three cases, the second comes back blank: one scored, one blank, one never reached.
+function brokenBatch(batch = 'one') {
+  const fx = makeFixture();
+  addReplay(fx, 's02');
+  addReplay(fx, 's03');
+  const fake = makeFake();
+  fake.queue(canned(inWindow()), canned('cut off'));
+  const r = runCli(fx, fake, batch);
+  assert.equal(r.status, 1, r.out + r.err);
+  assert.match(r.out, new RegExp(`batch ${batch}: scored 1, batch_cases 3`));
+  return { fx, fake };
+}
+
+test('resume: runs only the blank and unplanned cases, in the same batch, and completes it', () => {
+  const { fx, fake } = brokenBatch();
+  const before = fake.reviews().length;
+  fake.queue(canned(inWindow()), canned(inWindow()));
+  const r = resumeCli(fx, fake, 'one');
+  assert.equal(r.status, 0, r.out + r.err);
+  assert.equal(fake.reviews().length - before, 2, 's01 is not run again');
+  assert.match(r.out, /s02: caught 1/);
+  assert.match(r.out, /s03: caught 1/);
+  assert.doesNotMatch(r.out, /s01:/);
+  assert.match(r.out, /batch one: scored 3, batch_cases 3/);
+  const rows = rowsOf(fx);
+  assert.deepEqual(rows.map((row) => [row.case, row.caught]), [
+    ['s01', '1'],
+    ['s02', ''],
+    ['s02', '1'],
+    ['s03', '1'],
+  ]);
+  assert.ok(rows.every((row) => row.batch === 'one' && row.batch_cases === '3'));
+  assert.deepEqual(batchSummary(rows, 'one'), { rows: 4, scored: 3, batchCases: 3 });
+  // The first answer stays: raw output is the record of what ran.
+  const root = dirname(rawFolder(fx, 'one', 's02'));
+  assert.ok(existsSync(join(root, 's02', 'answer.json')));
+  assert.ok(existsSync(join(root, 's02-resume-1', 'answer.json')));
+  assert.ok(existsSync(join(root, 's03', 'answer.json')));
+  assert.ok(!existsSync(join(root, 's01-resume-1')));
+  assert.match(readFileSync(join(root, 's02', 'answer.json'), 'utf8'), /cut off/);
+});
+
+test('batchSummary: the latest row per case speaks, while rows stay what the file holds', () => {
+  const row = (name, caught) => ({ batch: 'x', case: name, caught, batch_cases: '2' });
+  assert.deepEqual(batchSummary([row('a', '1'), row('a', ''), row('b', '0')], 'x'), {
+    rows: 3,
+    scored: 1,
+    batchCases: 2,
+  });
+  assert.deepEqual(batchSummary([row('a', '1'), row('a', '0'), row('b', '')], 'x'), {
+    rows: 3,
+    scored: 1,
+    batchCases: 2,
+  });
+});
+
+test('resume: still blank stays incomplete and stops; the next resume takes a new raw folder', () => {
+  const { fx, fake } = brokenBatch();
+  fake.queue(canned('cut off again'), canned(inWindow()));
+  const first = resumeCli(fx, fake, 'one');
+  assert.equal(first.status, 1, first.out);
+  assert.match(first.out, /batch one: scored 1, batch_cases 3/);
+  assert.equal(rowsOf(fx).length, 3, 'stops at the first unscored case');
+  fake.queue(canned(inWindow()), canned(inWindow()));
+  const second = resumeCli(fx, fake, 'one');
+  assert.equal(second.status, 0, second.out);
+  const root = dirname(rawFolder(fx, 'one', 's02'));
+  assert.ok(existsSync(join(root, 's02-resume-2', 'answer.json')));
+});
+
+test('resume: nothing left spends nothing, not even the boundary check', () => {
+  const fx = makeFixture();
+  const fake = makeFake();
+  fake.queue(canned(inWindow()));
+  assert.equal(runCli(fx, fake, 'one').status, 0);
+  const calls = fake.calls().length;
+  const r = resumeCli(fx, fake, 'one');
+  assert.equal(r.status, 0, r.out + r.err);
+  assert.match(r.out, /batch one: scored 1, batch_cases 1/);
+  assert.equal(fake.calls().length, calls);
+  assert.equal(rowsOf(fx).length, 1);
+});
+
+test('resume: the boundary check still comes first', () => {
+  const { fx, fake } = brokenBatch();
+  fake.probe('skip-cat');
+  const before = fake.reviews().length;
+  const r = resumeCli(fx, fake, 'one');
+  assert.equal(r.status, 1);
+  assert.match(r.out, /batch one: not started, the boundary check did not pass/);
+  assert.equal(fake.reviews().length, before);
+});
+
+test('resume: refused before any token when the name is wrong or both options are given', () => {
+  const { fx, fake } = brokenBatch();
+  const calls = fake.calls().length;
+  const absent = resumeCli(fx, fake, 'other');
+  assert.notEqual(absent.status, 0);
+  assert.match(absent.err, /batch other cannot resume: batch other is not in the ledger/);
+  const both = resumeCli(fx, fake, 'one', ['--batch', 'two']);
+  assert.notEqual(both.status, 0);
+  assert.match(both.err, /--batch starts a batch and --resume continues one/);
+  const bad = resumeCli(fx, fake, 'Not A Slug');
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.err, /batch must be a lowercase slug/);
+  assert.equal(fake.calls().length, calls);
+  assert.equal(rowsOf(fx).length, 2);
+});
+
+test('resume: refused before any token when text, effort, model or a case differ', () => {
+  const refused = (edit, pattern, extra = []) => {
+    const { fx, fake } = brokenBatch();
+    edit(fx);
+    const calls = fake.calls().length;
+    const r = resumeCli(fx, fake, 'one', extra);
+    assert.notEqual(r.status, 0, String(pattern));
+    assert.match(r.err, pattern);
+    assert.equal(fake.calls().length, calls, String(pattern));
+    assert.equal(rowsOf(fx).length, 2, String(pattern));
+  };
+  refused(
+    (fx) => write(fx.agentsDir, 'code-reviewer.md', AGENT_TEXT.replace('You review', 'Now you review')),
+    /s02: agent_text differs/,
+  );
+  refused(() => {}, /s02: effort differs/, ['--effort', 'low']);
+  refused(() => {}, /s02: model differs/, ['--model', 'sonnet']);
+  // A scored case, a blank one and one with no row are all held to the batch.
+  refused(
+    (fx) => write(fx.ledgerDir, 'drills/s01/spec.md', `${SPEC}\nReworded.\n`),
+    /s01: case_hash differs/,
+  );
+  refused(
+    (fx) => write(fx.ledgerDir, 'drills/s02/spec.md', `${SPEC}\nReworded.\n`),
+    /s02: case_hash differs/,
+  );
+  // A new case, or a retired one, is another plan.
+  refused((fx) => addReplay(fx, 's04'), /the plan has 4 cases and the batch 3/);
+  refused((fx) => {
+    const file = join(fx.ledgerDir, 'drills', 's01', 'case.json');
+    const def = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(file, JSON.stringify({ ...def, retired: '2030-01-01' }));
+  }, /s01 is in the batch but not in the plan/);
+  // Fewer cases by a filter is too.
+  refused(() => {}, /the plan has 1 cases and the batch 3/, ['--case', 's02']);
+});
+
+test('resume: a domain checklist edit is a text change, so it refuses too', () => {
+  const profile = `${PROFILE}\n## Domain checklist\n\n- A made-up rule.\n`;
+  const fx = makeFixture({ headProfile: profile });
+  git(fx.repo, 'checkout', '--quiet', 'main');
+  addReplay(fx, 's02');
+  const fake = makeFake();
+  fake.queue(canned(inWindow()), canned('cut off'));
+  assert.equal(runCli(fx, fake, 'one').status, 1);
+  assert.equal(rowsOf(fx)[0].agent_text, agentTextHash(AGENT_TEXT, profile));
+  write(fx.repo, 'docs/agents.md', `${PROFILE}\n## Domain checklist\n\n`);
+  git(fx.repo, 'add', 'docs/agents.md');
+  git(fx.repo, 'commit', '--quiet', '-m', 'Drop the only item');
+  const r = resumeCli(fx, fake, 'one');
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /s02: agent_text differs/);
+});
+
+test('resume: other context may move, and is recorded row by row', () => {
+  const profile = `${PROFILE}\n## Domain checklist\n\n- A made-up rule.\n`;
+  const fx = makeFixture({ headProfile: profile });
+  git(fx.repo, 'checkout', '--quiet', 'main');
+  addReplay(fx, 's02');
+  const fake = makeFake();
+  fake.queue(canned(inWindow()), canned('cut off'));
+  assert.equal(runCli(fx, fake, 'one').status, 1);
+  write(fx.repo, 'docs/agents.md', `${profile}\n## Another section\n\nMore.\n`);
+  git(fx.repo, 'add', 'docs/agents.md');
+  git(fx.repo, 'commit', '--quiet', '-m', 'Edit elsewhere');
+  fake.queue(canned(inWindow()));
+  const r = resumeCli(fx, fake, 'one');
+  assert.equal(r.status, 0, r.out + r.err);
+  const rows = rowsOf(fx);
+  assert.equal(rows.at(-1).agent_text, rows[0].agent_text);
+  assert.notEqual(rows.at(-1).context_text, rows[0].context_text);
+});
+
+test('resume: the same filters as the batch give the same plan', () => {
+  const fx = makeFixture();
+  addReplay(fx, 's02');
+  const fake = makeFake();
+  fake.queue(canned('cut off'));
+  assert.equal(runCli(fx, fake, 'one', ['--case', 's01']).status, 1);
+  fake.queue(canned(inWindow()));
+  const r = resumeCli(fx, fake, 'one', ['--case', 's01']);
+  assert.equal(r.status, 0, r.out + r.err);
+  assert.match(r.out, /batch one: scored 1, batch_cases 1/);
+  assert.equal(rowsOf(fx).at(-1).batch_cases, '1');
+});
+
+test('resume: a blank row that ran on the wrong model does not refuse the run that fixes it', () => {
+  const fx = makeFixture();
+  const fake = makeFake();
+  const sonnet = { modelUsage: { 'claude-sonnet-9-9': { outputTokens: 5 } } };
+  fake.queue(canned(inWindow(), sonnet));
+  assert.equal(runCli(fx, fake, 'one').status, 1);
+  assert.equal(rowsOf(fx)[0].model, 'claude-sonnet-9-9');
+  assert.equal(rowsOf(fx)[0].caught, '');
+  fake.queue(canned(inWindow()));
+  assert.equal(resumeCli(fx, fake, 'one').status, 0);
+});
+
+test('resume: an alias that moved to a new model leaves a blank row, not a mixed batch', () => {
+  const { fx, fake } = brokenBatch();
+  const moved = { modelUsage: { 'claude-opus-9-10': { outputTokens: 5 } } };
+  fake.queue(canned(inWindow(), moved));
+  const r = resumeCli(fx, fake, 'one');
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /s02: caught blank \(model claude-opus-9-10 is not the batch's claude-opus-9-9\)/);
+  const last = rowsOf(fx).at(-1);
+  assert.equal(last.caught, '');
+  assert.equal(last.model, 'claude-opus-9-10');
+  assert.equal(rowsOf(fx).length, 3, 'stops there');
+  const score = JSON.parse(
+    readFileSync(join(dirname(rawFolder(fx, 'one', 's02')), 's02-resume-1', 'score.json'), 'utf8'),
+  );
+  assert.equal(score.scored, false);
+});
+
+test('holdToBatchModel: only a scored row of the same reviewer and tier in the batch binds it', () => {
+  const c = { reviewer: 'r', tier: 2 };
+  const scored = { scored: true, caught: 1, model: 'm-2' };
+  const row = (over = {}) => ({ batch: 'b', reviewer: 'r', tier: '2', caught: '1', model: 'm-1', ...over });
+  assert.equal(holdToBatchModel(scored, [row()], 'b', c).scored, false);
+  assert.deepEqual(holdToBatchModel(scored, [row({ model: 'm-2' })], 'b', c), scored);
+  for (const other of [{ batch: 'x' }, { reviewer: 'y' }, { tier: '3' }, { caught: '' }]) {
+    assert.deepEqual(holdToBatchModel(scored, [row(other)], 'b', c), scored, JSON.stringify(other));
+  }
+  const blank = { scored: false, reasons: ['x'], model: null };
+  assert.equal(holdToBatchModel(blank, [row()], 'b', c), blank);
+});
+
+test('resumePlan: rows that disagree on batch_cases are refused, and the plan is what is left', () => {
+  const entry = (id, plan = {}) => ({
+    caseDef: { id, reviewer: 'r', tier: 2 },
+    plan: { model: 'opus', effort: 'high', agentText: 't', caseHash: `h-${id}`, ...plan },
+  });
+  const row = (id, over = {}) => ({
+    batch: 'b',
+    case: id,
+    reviewer: 'r',
+    tier: '2',
+    model: 'claude-opus-9-9',
+    effort: 'high',
+    caught: '1',
+    batch_cases: '2',
+    agent_text: 't',
+    case_hash: `h-${id}`,
+    ...over,
+  });
+  const entries = [entry('a'), entry('b')];
+  const ids = (plan) => plan.todo.map((e) => e.caseDef.id);
+  assert.deepEqual(resumePlan([], 'b', entries).problems, ['batch b is not in the ledger']);
+  const clean = resumePlan([row('a')], 'b', entries);
+  assert.deepEqual(clean.problems, []);
+  assert.deepEqual(ids(clean), ['b']);
+  // Latest row per case: blank then scored is done, scored then blank is not.
+  assert.deepEqual(ids(resumePlan([row('a', { caught: '' }), row('a'), row('b')], 'b', entries)), []);
+  assert.deepEqual(ids(resumePlan([row('a'), row('a', { caught: '' }), row('b')], 'b', entries)), ['a']);
+  // Another batch's rows say nothing.
+  assert.deepEqual(ids(resumePlan([row('a'), row('b', { batch: 'x' })], 'b', entries)), ['b']);
+  assert.deepEqual(resumePlan([row('a'), row('b', { batch_cases: '3' })], 'b', entries).problems, [
+    'its rows disagree on batch_cases',
+  ]);
+  // Another tier may run at another effort and model; the same tier may not.
+  const tier3 = entry('b', { effort: 'xhigh' });
+  tier3.caseDef.tier = 3;
+  assert.deepEqual(resumePlan([row('a')], 'b', [entry('a'), tier3]).problems, []);
+  assert.deepEqual(resumePlan([row('a')], 'b', [entry('a'), entry('b', { effort: 'xhigh' })]).problems, [
+    'b: effort differs',
+  ]);
+  // Another reviewer's text is its own.
+  const other = entry('b', { agentText: 'u' });
+  other.caseDef.reviewer = 'q';
+  assert.deepEqual(resumePlan([row('a')], 'b', [entry('a'), other]).problems, []);
+});
+
+test('compare: a blank that later scored is one pair, read at its later row', () => {
+  const row = (batch, id, caught) => ({
+    batch,
+    case: id,
+    reviewer: 'r',
+    model: 'm',
+    effort: 'e',
+    planted: '1',
+    caught,
+    agent_text: 't',
+    context_text: 'c',
+    case_hash: 'h',
+  });
+  const { common, lines } = compareBatches(
+    [row('a', 's1', '1'), row('b', 's1', ''), row('b', 's1', '0')],
+    'a',
+    'b',
+  );
+  assert.deepEqual(common, ['s1']);
+  assert.match(lines.join('\n'), /m e 1 of 1, m e 0 of 1 \(lower\)/);
+  const open = compareBatches([row('a', 's1', '1'), row('b', 's1', '0'), row('b', 's1', '')], 'a', 'b');
+  assert.deepEqual(open.common, []);
+});
+
+test('run: a resumed batch reads as current in the global view, the blank counted once', () => {
+  const root = newDir('root');
+  const profile = `${PROFILE}\n## Risk class\n\nA (made up).\n\n## Paths\n\n- Ledgers: \`vault/ops/agent-ledger.csv\`.\n`;
+  const fx = makeFixture({ root, headProfile: profile });
+  addReplay(fx, 's02');
+  const fake = makeFake();
+  fake.queue(canned('cut off'));
+  git(fx.repo, 'checkout', '--quiet', 'main');
+  assert.equal(runCli(fx, fake, 'one').status, 1);
+  const half = buildView({ root, agentsDir: fx.agentsDir });
+  assert.equal(half.projects[0].texts.find((t) => t.reviewer === 'code-reviewer').current, false);
+  fake.queue(canned(inWindow()), canned(inWindow()));
+  assert.equal(resumeCli(fx, fake, 'one').status, 0);
+  const view = buildView({ root, agentsDir: fx.agentsDir });
+  assert.deepEqual(view.projects[0].texts.find((t) => t.reviewer === 'code-reviewer'), {
+    reviewer: 'code-reviewer',
+    current: true,
+    scored: 2,
+    planned: 2,
+  });
+  assert.equal(view.totals.drill.rows, 2);
+  assert.equal(view.supersededDrillRows, 1);
+});
+
 // --- The boundary check ---
 
 test('probe: passes only with a recorded denial on every route, in both runs, with the real flags', () => {
@@ -2156,6 +2631,36 @@ test('probe: passes only with a recorded denial on every route, in both runs, wi
   assert.equal(shape.denialCount, 7);
   assert.equal(shape.globalRules, 'no');
   assert.equal(shape.globalRulesFile, false);
+  assert.equal(shape.pipedRead, 'not denied');
+});
+
+test('probe: a piped read is attempted and recorded, and never decides the boundary', () => {
+  const fake = makeFake();
+  process.env.FAKE_CLAUDE_DIR = fake.dir;
+  fake.probe('piped-denied');
+  const denied = runProbe({ claude: fake.bin, timeoutSec: 30 });
+  assert.equal(denied.ok, true, 'a denied piped read is no failure');
+  assert.equal(denied.runs[0].shape.pipedRead, 'denied');
+  assert.equal(denied.runs[0].shape.denialCount, 8);
+  assert.deepEqual(denied.runs[0].problems, []);
+  assert.match(fake.calls().at(-1).prompt, /Bash tool: git log --oneline -1 \| cat/);
+
+  fake.probe('pass');
+  const allowed = runProbe({ claude: fake.bin, timeoutSec: 30 });
+  assert.equal(allowed.ok, true);
+  assert.equal(allowed.runs[0].shape.pipedRead, 'not denied');
+
+  // It cannot hide a real failure either, and is not read as the allowed `git show` being refused.
+  fake.probe('skip-cat');
+  assert.equal(runProbe({ claude: fake.bin, timeoutSec: 30 }).ok, false);
+
+  const opts = { sentinel: 'marker-a', outside: '/x', inside: 'marker-b' };
+  const noList = checkBoundary(
+    { exit: 0, stdout: JSON.stringify({ subtype: 'success', is_error: false, result: 'marker-b' }), stderr: '' },
+    opts,
+  );
+  assert.equal(noList.ok, false);
+  assert.equal(noList.shape.pipedRead, 'unknown');
 });
 
 test('probe: the positive control, allowed reads must go through and bring the sentinel back', () => {
@@ -2581,7 +3086,7 @@ test('R6 part 1', (t) => {
   r = scenario('outside finding', fx, fake, 'r6-out');
   assert.match(r.out, /caught 0, other 1/);
 
-  fake.queue(canned(`[bug] no location given\n${WIN}`));
+  fake.queue(canned(`No [bug] found.\n${WIN}`));
   r = scenario('malformed line', fx, fake, 'r6-malformed');
   assert.match(r.out, /malformed 1/);
   assert.equal(rowsOf(fx).at(-1).malformed, '1');

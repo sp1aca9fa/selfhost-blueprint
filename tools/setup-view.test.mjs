@@ -21,15 +21,18 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  agentTextHash,
   buildView,
   caseHash,
   contextHash,
   DEFAULT_AGENTS_DIR,
   DEFAULT_ROOT,
+  domainChecklist,
   DRILLED_REVIEWERS,
   findProjects,
   hashParts,
   HEADERS,
+  latestPerCase,
   MIN_PLANTED,
   MIN_RUNS,
   modelMatches,
@@ -71,6 +74,11 @@ const profile = (cls = 'A (neutral): a made-up reason') => `# Agent profile
 ## Risk class
 
 ${cls}
+
+## Domain checklist
+
+- First check: a made-up rule.
+- Second check: another one.
 
 ## Models and efforts
 
@@ -144,10 +152,13 @@ const runRow = (over = {}) => {
   };
   return HEADERS.run.new.map((c) => r[c]).join(',');
 };
+// A case of its own unless told otherwise: the latest row per case in a batch is the one that counts.
+let autoCase = 0;
 const drillRow = (over = {}) => {
+  autoCase += 1;
   const r = {
     date: '2026-01-02',
-    case: 'c01',
+    case: `row-case-${autoCase}`,
     kind: 'replay',
     reviewer: 'code-reviewer',
     model: 'model-x-1',
@@ -170,8 +181,11 @@ const drillRow = (over = {}) => {
 const view = (root, agents = agentsDir(root)) => buildView({ root, agentsDir: agents });
 const groupList = (groups) => [...groups.values()];
 
-function hashFor(agents, reviewer) {
-  return hashParts([readFileSync(join(agents, `${reviewer}.md`))]);
+function hashFor(agents, reviewer, dir) {
+  return agentTextHash(
+    readFileSync(join(agents, `${reviewer}.md`)),
+    readFileSync(join(dir, 'docs', 'agents.md')),
+  );
 }
 
 // As the runner computes it. The global rules are empty here: the view runs under an empty HOME.
@@ -717,9 +731,10 @@ describe('which batch speaks for a reviewer', () => {
     const agents = agentsDir(root);
     const dir = addProject(root, 'alpha', extra);
     const hashes = Object.fromEntries(cases.map((id) => [id, addCase(dir, id)]));
-    const agentHash = hashFor(agents, 'code-reviewer');
+    const agentHash = hashFor(agents, 'code-reviewer', dir);
     const row = (over = {}) =>
       drillRow({
+        case: 'c01',
         agent_text: agentHash,
         case_hash: hashes[over.case ?? 'c01'],
         context_text: contextFor(dir),
@@ -915,6 +930,75 @@ describe('which batch speaks for a reviewer', () => {
     assert.equal(statusOf(partial), 'batch incomplete, scored 2 of 3');
   });
 
+  describe('a resumed batch', () => {
+    const totalsOf = (fixture) => buildView({ root: fixture.root, agentsDir: fixture.agents });
+
+    it('a blank that later scored is one case, not two, and fills the batch', () => {
+      const fixture = setup(
+        (row) => [
+          row({ case: 'c01' }),
+          row({ case: 'c02', ...BLANK }),
+          row({ case: 'c02', caught: '2' }),
+        ],
+        { cases: ['c01', 'c02'] },
+      );
+      assert.equal(statusOf(fixture), 'current, scored 2 of 2');
+      const v = totalsOf(fixture);
+      const counts = groupList(v.groups.drill).map((g) => g.counts);
+      assert.deepEqual(counts, [
+        { rows: 2, scored: 2, unscored: 0, planted: 4, caught: 3, other: 6, malformed: 0 },
+      ]);
+      assert.equal(v.totals.drill.rows, 2);
+      assert.equal(v.supersededDrillRows, 1);
+      assert.match(renderView(v), /drill: rows 2, .*scored 2, unscored 0, superseded 1/);
+    });
+
+    it('still blank: the batch stays incomplete', () => {
+      const fixture = setup(
+        (row) => [row({ case: 'c01' }), row({ case: 'c02', ...BLANK }), row({ case: 'c02', ...BLANK })],
+        { cases: ['c01', 'c02'] },
+      );
+      assert.equal(statusOf(fixture), 'batch incomplete, scored 1 of 2');
+      assert.equal(totalsOf(fixture).supersededDrillRows, 1);
+    });
+
+    it('the latest row speaks: a blank after a score leaves the case open', () => {
+      const fixture = setup((row) => [row({ case: 'c01' }), row({ case: 'c01', ...BLANK })]);
+      assert.equal(statusOf(fixture), NO_BATCH);
+    });
+
+    it('a blank with no model after a score leaves the case open too', () => {
+      const fixture = setup((row) => [row({ case: 'c01' }), row({ case: 'c01', ...BLANK, model: '' })]);
+      assert.equal(statusOf(fixture), NO_BATCH);
+    });
+
+    it('rows of one case in two batches are two rows', () => {
+      const fixture = setup((row) => [row({ batch: 'one' }), row({ batch: 'two' })]);
+      assert.equal(totalsOf(fixture).totals.drill.rows, 2);
+      assert.equal(totalsOf(fixture).supersededDrillRows, 0);
+    });
+
+    it('nothing superseded prints 0, and rows with no batch or case replace nothing', () => {
+      assert.match(renderView(totalsOf(setup((row) => [row()]))), /superseded 0/);
+      const kept = latestPerCase([
+        { batch: '', case: 'a' },
+        { batch: '', case: 'a' },
+        { batch: 'b', case: '' },
+        { batch: 'b', case: '' },
+      ]);
+      assert.equal(kept.length, 4);
+    });
+
+    it('keeps file order by the rows that remain', () => {
+      const order = latestPerCase([
+        { batch: 'x', case: 'a', n: 1 },
+        { batch: 'x', case: 'b', n: 2 },
+        { batch: 'x', case: 'a', n: 3 },
+      ]);
+      assert.deepEqual(order.map((r) => r.n), [2, 3]);
+    });
+  });
+
   it("a row with this reviewer's text under another reviewer's name does not count", () => {
     assert.equal(statusOf(setup((row) => [row({ reviewer: 'code-reviewer-light' })])), NO_BATCH);
   });
@@ -1029,15 +1113,90 @@ describe('which batch speaks for a reviewer', () => {
     assert.match(hashParts(['a', 'b', 'c']), /^[0-9a-f]{16}$/);
   });
 
-  it('agent_text hashes the agent file alone', () => {
+  it('agent_text hashes the agent file and the domain checklist, nothing else', () => {
     const fixture = setup((row) => [row()]);
+    const file = join(fixture.dir, 'docs', 'agents.md');
+    const text = readFileSync(file, 'utf8');
     assert.equal(
-      hashFor(fixture.agents, 'code-reviewer'),
-      hashParts([readFileSync(join(fixture.agents, 'code-reviewer.md'))]),
+      hashFor(fixture.agents, 'code-reviewer', fixture.dir),
+      hashParts([
+        readFileSync(join(fixture.agents, 'code-reviewer.md')),
+        '- First check: a made-up rule.\n- Second check: another one.',
+      ]),
     );
     write(join(fixture.dir, 'CLAUDE.md'), 'edited\n');
-    write(join(fixture.dir, 'docs', 'agents.md'), `${profile()}\nedited\n`);
+    write(file, `${text}\nedited\n`);
     assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+    // Elsewhere in the profile, and blank lines around the checklist: the same.
+    write(file, text.replace('## Domain checklist\n', '## Domain checklist\n\n\n'));
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+  });
+
+  it('deleting one domain checklist item needs a new batch, even the only one', () => {
+    for (const [what, edit] of [
+      ['one of two', (t) => t.replace('- Second check: another one.\n', '')],
+      ['reworded', (t) => t.replace('a made-up rule', 'a made-up duty')],
+      [
+        'the only one',
+        (t) => t.replace('- First check: a made-up rule.\n- Second check: another one.\n', ''),
+      ],
+      ['a new item', (t) => t.replace('## Models', '- Third check: more.\n\n## Models')],
+      ['the whole section', (t) => t.replace(/## Domain checklist[\s\S]*?(?=## Models)/, '')],
+    ]) {
+      const fixture = setup((row) => [row()]);
+      const file = join(fixture.dir, 'docs', 'agents.md');
+      assert.equal(statusOf(fixture), 'current, scored 1 of 1', what);
+      write(file, edit(readFileSync(file, 'utf8')));
+      assert.equal(statusOf(fixture), NO_BATCH, what);
+    }
+  });
+
+  it('a profile with no domain checklist is handled: a hash, stable, and a batch can match it', () => {
+    const noList = '# Profile\n\n## Risk class\n\nA\n';
+    assert.equal(domainChecklist(noList), '');
+    assert.equal(domainChecklist(''), '');
+    assert.equal(agentTextHash('text', noList), hashParts(['text', '']));
+    assert.equal(agentTextHash('text', noList), agentTextHash(Buffer.from('text'), Buffer.from(noList)));
+    assert.notEqual(agentTextHash('text', noList), agentTextHash('text', profile()));
+
+    const fixture = setup((row) => [row()]);
+    const file = join(fixture.dir, 'docs', 'agents.md');
+    const text = readFileSync(file, 'utf8').replace(/## Domain checklist[\s\S]*?(?=## Models)/, '');
+    write(file, text);
+    const hash = hashFor(fixture.agents, 'code-reviewer', fixture.dir);
+    assert.equal(hash, hashParts([readFileSync(join(fixture.agents, 'code-reviewer.md')), '']));
+    const ledger = join(fixture.dir, 'vault', 'ops', 'drill-ledger.csv');
+    write(
+      ledger,
+      lines(
+        DRILL,
+        drillRow({
+          case: 'c01',
+          agent_text: hash,
+          case_hash: caseHash(join(fixture.dir, 'vault', 'ops', 'drills', 'c01')),
+          context_text: contextFor(fixture.dir),
+        }),
+      ),
+    );
+    assert.equal(statusOf(fixture), 'current, scored 1 of 1');
+  });
+
+  it('only that section is read: not a deeper heading, not a look-alike, and every section of that name', () => {
+    const text = [
+      '## Domain checklist',
+      '- one',
+      '### a deeper heading stays inside',
+      '- two',
+      '## Domain checklist extra',
+      '- not this',
+      '# Top',
+      '- nor this',
+      '## Domain checklist',
+      '- three',
+      '',
+    ].join('\r\n');
+    assert.equal(domainChecklist(text), '- one\n### a deeper heading stays inside\n- two\n- three');
+    assert.equal(domainChecklist('## Domain checklist\n- one\n# Top\n- not this\n'), '- one');
   });
 });
 
@@ -1072,12 +1231,12 @@ describe('output', () => {
         drillRow({
           case: 'sentinel-case',
           batch: 'sentinel-batch',
-          agent_text: hashFor(agents, 'code-reviewer'),
+          agent_text: hashFor(agents, 'code-reviewer', dir),
           case_hash: addCase(dir, 'sentinel-case', { what: 'sentinel-key-text' }),
           context_text: 'sentinel-context',
           kind: 'planted',
         }),
-        drillRow({ case: 'sentinel-case', batch: 'sentinel-batch', caught: '' }),
+        drillRow({ case: 'sentinel-other', batch: 'sentinel-batch', caught: '' }),
       ),
     );
     return { root, agents, dir };
@@ -1087,7 +1246,7 @@ describe('output', () => {
     const { root, agents, dir } = leakFixture();
     const out = renderView(buildView({ root, agentsDir: agents }));
     assert.doesNotMatch(out, /sentinel/i);
-    assert.equal(out.includes(hashFor(agents, 'code-reviewer')), false, 'no hash printed');
+    assert.equal(out.includes(hashFor(agents, 'code-reviewer', dir)), false, 'no hash printed');
     assert.equal(out.includes(contextFor(dir)), false, 'no context hash printed');
     assert.match(out, /context changed since the batch of \d{4}-\d{2}-\d{2}/);
     assert.equal(out.includes(root), false, 'no root path printed');
@@ -1228,6 +1387,13 @@ describe('templates', () => {
       assert.deepEqual(readLedger(join(ops, file), kind), { status: 'ok', rows: [], unreadLines: 0 });
     });
   }
+
+  it('process-reviewed.txt is there and empty: a new project has looked at nothing', () => {
+    assert.equal(
+      readFileSync(join(REPO, 'templates', 'private', 'ops', 'process-reviewed.txt'), 'utf8'),
+      '',
+    );
+  });
 
   it('the ledger columns only add at the end, as the design says', () => {
     assert.deepEqual(HEADERS.agent.new.slice(-2), ['model', 'effort']);

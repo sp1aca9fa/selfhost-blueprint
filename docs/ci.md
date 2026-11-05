@@ -117,8 +117,8 @@ A trailer anywhere else is not read, so it counts as missing and fails loudly. `
   code before its review. The fix is to run the missing review and commit under the same slug. No
   history rewrite, and the next push's range is judged on its own, so a mistake is red once.
 - **A commit with no `Ship-Task` has no task to close**, and only a history rewrite could add one.
-  So: review it and log it. `--audit` keeps listing it as `unclaimed`, and the setup review treats
-  only a rise in that count since its last review as open.
+  So: look at it, then add its sha to `process-reviewed.txt` in the private ledger folder. `--audit`
+  keeps listing it as `unclaimed`; what stays open is `unreviewed`, the commits not in that file.
 - **A push that changes the config is judged by both versions**, the one before the push and the one
   it brings, and fails if either fails. So emptying a reviewer list, or moving a trust path to
   `tier0`, cannot pass in the same push. Failures only the old rules find say `(by the config before
@@ -148,12 +148,19 @@ shas, fixed texts, validated slugs and config names, never commit text.
 ### By hand
 
 - `node ops/process-check.mjs origin/main` at the end of a task, so CI is only the backstop.
-- `node ops/process-check.mjs --audit` (not in the workflow, no CI effect) reads boundary..HEAD and
-  prints tasks never closed, the commits that failed a rule with no task to close (`unclaimed 2:
-  <sha> <sha>`), and counts: `audit: tasks 12, open 1, unclaimed 2, why 3, owner 1`. A task that
-  closed in a later push is not open. An unclaimed commit stays listed, since it cannot be closed
+- `node ops/process-check.mjs --audit --reviewed <ledger folder>/process-reviewed.txt` (not in the
+  workflow, no CI effect) reads boundary..HEAD and prints tasks never closed, the commits that fail a
+  rule with no task to close (`unclaimed 2: <sha> <sha>`), those not in the file (`unreviewed 1:
+  <sha>`), and counts: `audit: tasks 12, open 1, unclaimed 2, unreviewed 1, why 3, owner 1`. A task
+  that closed in a later push is not open. An unclaimed commit stays listed, since it cannot be closed
   without a history rewrite. The setup review reads it, because a task closed in no push, or a commit
   with no trailers, is otherwise flagged by nothing after its one red run.
+- `process-reviewed.txt` holds one sha per line, any length from 7. A session adds a sha only after
+  looking at that commit. Only `unreviewed` above 0 is open. A missing file lists nothing, so every
+  unclaimed commit counts; a line that is not a sha fails the audit. It is a list of shas rather than
+  a count because a count cannot tell a new commit from an old one that stopped failing, and a config
+  change can move commits both ways: tightening one makes a properly reviewed task read unclaimed,
+  and that commit gets looked at too.
 
 ### The config
 
@@ -203,10 +210,18 @@ only `process.yml` a job `process-check`, no other job is named either, and `che
 Two pushes, in this order. The server runs its installed `ci-status.sh` against the new commit, so the
 filter only takes effect after an update:
 
-1. Push the new `ops/ci-status.sh` and its tests. The condition for the second push is both of these
-   on the server: `grep -c process-check ops/ci-status.sh` prints 1, and `update.log` holds
-   `<App> is up: <x> -> <first push's short sha>`. The grep alone is not enough: an update merges
-   first and runs its checks after, so during an update that then fails and goes back, it reads 1.
+1. Push the new `ops/ci-status.sh` and its tests. The condition for the second push, run on the server
+   from the repo, with `<state folder>` the folder holding `update.log`:
+
+   ```bash
+   s="$(git rev-parse --short HEAD)" && if [ "$(grep -c process-check ops/ci-status.sh)" = 1 ] && grep -qE "<App> is up: .* -> $s " <state folder>/update.log; then echo "OK $s"; else echo "NOT YET"; fi
+   ```
+
+   It wants `OK <short sha>`. It reads HEAD rather than the first push's sha, because a submodule bump
+   pushed with it makes HEAD a later commit. The grep alone is not enough: an update merges first and
+   runs its checks after, so during an update that then fails and goes back, it reads 1. Only the
+   automatic update writes that log line, so an update by hand leaves `NOT YET` with the filter
+   installed: push any later commit other than the next step's, let it install, and run this again.
 2. Only then push the workflow, script, tests and config, and add `.github/workflows/` and the
    `ops/process-check` files to the profile's Paths. The script's failure message points at
    `docs/ci.md`, so the project needs a short one with a "Process check" section. The script and its

@@ -18,10 +18,13 @@
 // - Rows with no model are counted and excluded; they are never guessed or backfilled.
 // - Groups are never merged. Too few is a stated constant and is not adjusted.
 // - Acceptance is a hint only; drill scores are the basis for comparing models.
-// - A reviewer is current only by a batch for its own text, at the profile's model and effort for
-//   each case's tier, that scored every active case as it now stands. A later batch at another model,
-//   effort or text, or of fewer cases, is ignored: a named comparison cannot reopen anything. A change
-//   in the profile or rules around that text prints one information line and reopens nothing.
+// - A reviewer is current only by a batch for its own text and the profile's domain checklist, at the
+//   profile's model and effort for each case's tier, that scored every active case as it now stands. A
+//   later batch at another model, effort or text, or of fewer cases, is ignored: a named comparison
+//   cannot reopen anything. A change elsewhere in the profile or rules prints one information line and
+//   reopens nothing.
+// - A batch can be resumed, so it can hold a blank and a later score for one case. The latest row per
+//   case in a batch is the one that counts; the rows it replaces are only counted as superseded.
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
@@ -282,10 +285,27 @@ export function hashParts(parts) {
   return hash.digest('hex').slice(0, 16);
 }
 
-// `agent_text`: the reviewer's own agent file, and nothing else.
-function currentAgentHash(reviewer, agentsDir) {
+// The profile's `## Domain checklist`, in its order, without blank lines around it. A profile with no
+// such section gives an empty text, so its hash is still defined, and adding or removing the section
+// moves the hash. Every section of that name counts, so a second one cannot go unseen.
+export function domainChecklist(profile) {
+  const kept = [];
+  let inside = false;
+  for (const line of String(profile).split(/\r?\n/)) {
+    if (/^##?\s/.test(line)) inside = line.trim() === '## Domain checklist';
+    else if (inside) kept.push(line);
+  }
+  return kept.join('\n').trim();
+}
+
+// `agent_text`: the reviewer's own agent file and the profile's domain checklist, its first criterion
+// and the setup review's standard lever. Nothing else from the profile or rules: those are context.
+export const agentTextHash = (agentBytes, profile) =>
+  hashParts([agentBytes, domainChecklist(profile)]);
+
+function currentAgentHash(reviewer, agentsDir, profile) {
   try {
-    return hashParts([readFileSync(join(agentsDir, `${reviewer}.md`))]);
+    return agentTextHash(readFileSync(join(agentsDir, `${reviewer}.md`)), profile);
   } catch {
     // A text that cannot be read has no known hash, so no batch can be shown to match it.
     return null;
@@ -375,6 +395,19 @@ export function modelMatches(id, requested) {
   return id === requested || id.startsWith(`${requested}-`);
 }
 
+// One row per case in each batch: the latest, in the order those rows were written. The ledger is
+// append-only, so a resumed batch keeps its blank and adds the later score. A row with no batch or case
+// names nothing to replace, and stays.
+export function latestPerCase(rows) {
+  const latest = new Map();
+  rows.forEach((r, i) => {
+    const key = isBlank(r.batch) || isBlank(r.case) ? `row ${i}` : `${r.batch}\0${r.case}`;
+    latest.delete(key);
+    latest.set(key, r);
+  });
+  return [...latest.values()];
+}
+
 // The batch that speaks for this reviewer now. Rows are in file order, and the ledger is append-only,
 // so the latest batch is the one whose rows come last. Only rows scored for the current text, at the
 // profile's model and effort for their tier, count at all; so a named comparison, a draft text or a
@@ -440,6 +473,7 @@ export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR }) {
     projects: [],
     classes: { A: 0, B: 0, C: 0, [UNKNOWN]: 0 },
     totals: { agent: emptyTotals(), run: emptyTotals(), drill: emptyTotals() },
+    supersededDrillRows: 0,
     groups: { agent: new Map(), run: new Map(), drill: new Map() },
     texts: [],
   };
@@ -472,9 +506,11 @@ export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR }) {
       const ledger = readLedger(join(dir, paths[kind]), kind);
       project.status[kind] = ledger.status;
       if (ledger.status === 'no ledger' || ledger.status === 'unreadable') totals.noLedger += 1;
-      totals.rows += ledger.unreadLines + ledger.rows.length;
+      const rows = kind === 'drill' ? latestPerCase(ledger.rows) : ledger.rows;
+      view.supersededDrillRows += ledger.rows.length - rows.length;
+      totals.rows += ledger.unreadLines + rows.length;
       totals.malformed += ledger.unreadLines;
-      for (const row of ledger.rows) {
+      for (const row of rows) {
         const outcome = classifyRow(row, rules);
         if (outcome === 'no model') totals.noModel += 1;
         if (outcome === 'malformed') totals.malformed += 1;
@@ -502,7 +538,7 @@ export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR }) {
       ...reviewerStatus({
         rows: drillRows,
         reviewer,
-        agentHash: currentAgentHash(reviewer, agentsDir),
+        agentHash: currentAgentHash(reviewer, agentsDir, profile),
         profile,
         cases: active,
         unreadable,
@@ -558,7 +594,7 @@ export function renderView(view) {
   let scored = 0;
   for (const { counts } of groups.drill.values()) scored += counts.scored;
   const unscored = totals.drill.rows - totals.drill.malformed - scored;
-  const drillExtra = `, scored ${scored}, unscored ${unscored}`;
+  const drillExtra = `, scored ${scored}, unscored ${unscored}, superseded ${view.supersededDrillRows}`;
   lines.push(totalsLine('drill', totals.drill, groups.drill.size, drillExtra));
   lines.push('');
   lines.push(

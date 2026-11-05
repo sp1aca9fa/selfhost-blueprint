@@ -4,15 +4,17 @@
 // "Process check". No dependencies: CI runs it from a bare checkout.
 //
 //   node ops/process-check.mjs <before> [<after>]   check before..after (after: HEAD by default)
-//   node ops/process-check.mjs --audit [<after>]    boundary..after: tasks never closed, commits
-//                                                   that failed with no task to close, counts
+//   node ops/process-check.mjs --audit [<after>] [--reviewed <file>]
+//                                                   boundary..after: tasks never closed, commits
+//                                                   that failed with no task to close, those of
+//                                                   them not listed in the file, counts
 //
 // Exit 0: pass, or an audit. Exit 1: a rule failed, or the range cannot be trusted. Exit 2: usage.
 //
 // It prints shas, fixed texts, validated slugs and config names, never commit text: a message is
 // free text, and CI logs read some lines as commands.
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const CONFIG_PATH = 'ops/process-check.json';
@@ -438,7 +440,31 @@ function runCheck(git, beforeArg, afterArg) {
   };
 }
 
-function runAudit(git, afterArg) {
+/**
+ * The commits a session has looked at: one sha per line, any length from 7. A missing file lists
+ * nothing, so every unclaimed commit counts. A line that is not a sha is never skipped: a file that
+ * cannot be trusted fails the audit, rather than quietly leaving a commit out or in.
+ */
+function readReviewed(path) {
+  if (path === null) return [];
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw new Error(`${path}: could not be read`);
+  }
+  const lines = text.split(/\r?\n/).map((line) => line.trim());
+  lines.forEach((line, i) => {
+    if (line !== '' && !/^[0-9a-f]{7,40}$/.test(line)) {
+      throw new Error(`${path}: line ${i + 1} is not a sha`);
+    }
+  });
+  return lines.filter((line) => line !== '');
+}
+
+function runAudit(git, afterArg, reviewedPath) {
+  const reviewed = readReviewed(reviewedPath);
   const after = resolveCommit(git, afterArg);
   if (after === null) return fail('range unknown: after not found');
   if (isShallow(git)) return fail('range unknown: shallow clone (needs fetch-depth: 0)');
@@ -457,29 +483,48 @@ function runAudit(git, afterArg) {
   // Every failure line starts with its commit's short sha. These join no task, so without this line
   // a trust commit with no trailers would be invisible here after its one red run.
   const unclaimed = [...new Set(failures.map((line) => line.split(' ')[0]))];
+  // Shas, not a count: a count cannot tell a new commit from an old one that stopped failing.
+  const unreviewed = unclaimed.filter(
+    (sha) => !reviewed.some((seen) => seen.startsWith(sha) || sha.startsWith(seen)),
+  );
+  const listing = (name, shas) =>
+    shas.length > 0 ? [`${name} ${shas.length}: ${shas.join(' ')}`] : [];
   return {
     status: 0,
     lines: [
       ...problems.flat(),
-      ...(unclaimed.length > 0 ? [`unclaimed ${unclaimed.length}: ${unclaimed.join(' ')}`] : []),
+      ...listing('unclaimed', unclaimed),
+      ...listing('unreviewed', unreviewed),
       `audit: tasks ${tasks.length}, open ${open}, unclaimed ${unclaimed.length}, ` +
-        `why ${counts.why}, owner ${counts.owner}`,
+        `unreviewed ${unreviewed.length}, why ${counts.why}, owner ${counts.owner}`,
     ],
   };
 }
 
 function main(argv) {
   const audit = argv[0] === '--audit';
-  const args = audit ? argv.slice(1) : argv;
-  if ((audit && args.length > 1) || (!audit && (args.length < 1 || args.length > 2))) {
-    console.error('usage: process-check.mjs <before> [<after>] | --audit [<after>]');
+  const args = audit ? argv.slice(1) : [...argv];
+  const flag = args.indexOf('--reviewed');
+  const reviewedPath = flag === -1 ? null : (args[flag + 1] ?? '');
+  if (flag !== -1) args.splice(flag, 2);
+  if (
+    reviewedPath === '' ||
+    (!audit && flag !== -1) ||
+    (audit && args.length > 1) ||
+    (!audit && (args.length < 1 || args.length > 2))
+  ) {
+    console.error(
+      'usage: process-check.mjs <before> [<after>] | --audit [<after>] [--reviewed <file>]',
+    );
     return 2;
   }
   let result;
   try {
     const top = makeGit(process.cwd())(['rev-parse', '--show-toplevel']).trim();
     const git = makeGit(top);
-    result = audit ? runAudit(git, args[0] ?? 'HEAD') : runCheck(git, args[0], args[1] ?? 'HEAD');
+    result = audit
+      ? runAudit(git, args[0] ?? 'HEAD', reviewedPath)
+      : runCheck(git, args[0], args[1] ?? 'HEAD');
   } catch (error) {
     // Never a pass: a config it cannot use, or a git that does not answer, is a failure.
     result = fail(error.message);

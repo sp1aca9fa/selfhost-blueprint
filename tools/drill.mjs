@@ -6,6 +6,7 @@
 //   node tools/drill.mjs run --repo <repo> --ledger-dir <folder> --batch <name> [--case a,b]
 //     [--reviewer <name>] [--agents-dir <folder>] [--model <m>] [--effort <e>]
 //     [--test-allow <rule>]... [--install <cmd>]
+//   node tools/drill.mjs run ... --resume <name>   the same batch: only its blank or unplanned cases
 //   node tools/drill.mjs probe [--out <folder>]
 //   node tools/drill.mjs score --ledger-dir <folder> --raw <one case's raw folder> [--write]
 //   node tools/drill.mjs compare --ledger-dir <folder> --a <batch> --b <batch>
@@ -22,9 +23,10 @@
 // - A bug is caught when any finding overlaps any of its windows. Findings outside every window are
 //   counted, not judged. A finding range wider than a window can be never counts as caught: it counts
 //   as `other`, so a wide finding on the real bug reads as a miss, and width cannot buy a catch.
-// - A miss is believed only when every location was readable. With caught below planted, a
-//   malformed line carrying a file or line token, or a finding's file not in the reviewed tree, leaves
-//   `caught` blank: a real catch must not read as 0 because of how its location was written.
+// - A miss is believed unless an unreadable location could be the bug. With caught below planted, a
+//   finding whose path could be a window's file written another way, a malformed line naming such a
+//   file, or a tagged line naming no file leaves `caught` blank. Any other miss stands: each blank here
+//   drops a miss, so a wider rule would lift recall.
 // - The reviewer works in a clone that holds nothing later than the change. The script checks that
 //   and refuses to start otherwise. The word used for this programme appears in no prompt, folder or
 //   profile the reviewer can see.
@@ -54,11 +56,12 @@ import { parseArgs } from 'node:util';
 
 // One definition each, shared with the global view, so the two can never disagree.
 import {
+  agentTextHash,
   caseHash,
   contextHash,
   globalRulesPath,
-  hashParts,
   HEADERS,
+  latestPerCase,
   modelMatches,
   profileModel,
   readGlobalRules,
@@ -135,9 +138,17 @@ export function isBoundaryDenial(command) {
   });
 }
 
-// `git diff`, `git log` or `git show`, with any global options in front (`git --no-pager log`,
-// `git -C <folder> diff`). The reviewer's only view of the change goes through these.
-const GIT_READ = /^\s*git(?:\s+-c\s+\S+|\s+-C\s+\S+|\s+--?[\w-]+(?:=\S+)?)*\s+(?:diff|log|show)\b/;
+// The reviewer's plain look at the change: `git diff`, `git log` or `git show`, alone on the line.
+// A piped or chained form, or one with a global option, is refused by the allowlist for its other
+// part, and a reviewer retries it plainly; a real answer then still stands, so it must not stop a
+// paid batch. A denial matching the deny list is the boundary working.
+const BARE_GIT_READ = /^\s*git (?:diff|log|show)(?:\s|$)/;
+const SHELL_OPERATOR = /[|&;<>`$\n]/;
+
+export function isBareGitRead(command) {
+  const text = command.trim();
+  return BARE_GIT_READ.test(text) && !SHELL_OPERATOR.test(text) && !isBoundaryDenial(text);
+}
 
 class Refusal extends Error {}
 
@@ -293,24 +304,26 @@ function parseLocation(text, prefixes) {
   return { file: normalizePath(m[1], prefixes), ranges };
 }
 
-// A path or a name with an extension, `line 120`, `L120`, `:120` or `(120)`. Prose such as "No [bug]
-// found" has none, so it cannot leave a run unscored. `e.g.` and `i.e.` are not file names.
-function hasLocationToken(line) {
-  const text = line.replace(/\b(?:e\.g|i\.e)\b/gi, '');
-  return /[\w@-]\/[\w@.-]|\b[\w@-]+\.[a-z][a-z0-9]{0,5}\b|\blines?\s+\d|\bL\d|:\d|\(\d+\)/i.test(text);
+// The words of a line that could be paths, without a sentence's closing dot. `e.g.` and `i.e.` are not
+// file names.
+function pathWords(line) {
+  const text = line.replace(/\b(?:e\.g|i\.e)\b\.?/gi, ' ');
+  return (text.match(/[\w@./-]+/g) ?? []).map((word) => word.replace(/[.-]+$/, ''));
 }
+
+// A path, or a name with an extension.
+const namesAFile = (line) =>
+  pathWords(line).some((word) => word.includes('/') || /\.[a-z][a-z0-9]{0,5}$/i.test(word));
 
 // Reads the reviewer's own format, `[bug|fix|ask] file:line: ...`, through bullets, backticks, bold,
 // `./`, the clone's path prefix and `line-line` ranges. A line that starts like a finding but has no
-// file:line is malformed: counted, never a crash and never a silent miss.
+// file:line is malformed: counted, never a crash and never a silent miss. `slips` keeps those lines
+// for the scorer; `opensWithTag` says the line itself starts with a tag, rather than holding one in a
+// sentence or a table.
 export function parseFindings(answer, { prefixes = [] } = {}) {
   const findings = [];
-  let malformed = 0;
-  let located = 0;
-  const slip = (line) => {
-    malformed += 1;
-    if (hasLocationToken(line)) located += 1;
-  };
+  const slips = [];
+  const slip = (line, opensWithTag = false) => slips.push({ line, opensWithTag });
   const text = typeof answer === 'string' ? answer : '';
   for (const raw of text.split(/\r?\n/)) {
     const line = raw
@@ -324,7 +337,7 @@ export function parseFindings(answer, { prefixes = [] } = {}) {
       const location = parseLocation(tagged[2], prefixes);
       if (TAGS.includes(tag)) {
         if (location) findings.push({ tag, ...location });
-        else slip(line);
+        else slip(line, true);
       } else if (location) {
         slip(line);
       }
@@ -338,7 +351,7 @@ export function parseFindings(answer, { prefixes = [] } = {}) {
       slip(line);
     }
   }
-  return { findings, malformed, located };
+  return { findings, malformed: slips.length, slips };
 }
 
 function sameFile(found, wanted) {
@@ -440,29 +453,50 @@ export function scoreRun({ bugs, stdout, exit, requestedModel, clone, specPath, 
   if (problem) reasons.push(problem);
   if (reasons.length > 0) return { scored: false, reasons, model };
 
-  const { findings, malformed, located } = parseFindings(answer, { prefixes });
+  const { findings, malformed, slips } = parseFindings(answer, { prefixes });
   const { caught, caughtBugs, other } = scoreFindings(findings, bugs);
   // Only a miss is in doubt: every bug caught needs no more proof. The reasons name no file or window.
   if (caught < bugs.length) {
-    const doubts = [];
-    if (located > 0) doubts.push('a finding has a location that could not be read');
-    if (!Array.isArray(files)) {
-      if (findings.length > 0) doubts.push('no file list to check the findings against');
-    } else if (findings.some((f) => !inFileList(f.file, files))) {
-      doubts.push('a finding names a path not in the reviewed tree');
-    }
+    const doubts = missDoubts({ bugs, findings, slips, files });
     if (doubts.length > 0) return { scored: false, reasons: doubts, model };
   }
   return { scored: true, reasons, model, caught, caughtBugs, other, malformed };
 }
 
-function inFileList(file, files) {
-  return files.some((name) => sameFile(file, name));
+// Could this path be a window's file written another way: a part of its path, its base name, or the
+// whole path under some other prefix?
+function couldBeWindowFile(path, windowFiles) {
+  const p = path.replace(/^(?:\.\/|[ab]\/)/, '');
+  return windowFiles.some((w) => w === p || w.endsWith(`/${p}`) || p.endsWith(`/${w}`));
 }
 
-// A denied Read of the profile, the rules or the spec, or a denied look at the change itself. Unknown
-// counts: a denial with no readable path or command may have been a required one. A denial matching
-// the deny list is the boundary working: it must not stop a batch.
+// Doubt runs only on a miss, so every blank it leaves drops a miss and lifts recall. So it is kept to
+// where an unreadable location could really be the bug: a finding whose path may be a window's file, a
+// malformed line naming such a file, or a tagged line that names no file at all. A finding on some
+// other path is an ordinary miss. A path that is itself a file of the reviewed tree, and not a window's,
+// is that other file, whatever it resembles. Unknown stays unknown: with no list, nothing is ruled out.
+function missDoubts({ bugs, findings, slips, files }) {
+  const windowFiles = [...new Set(bugs.flatMap((bug) => bug.windows.map((w) => w.file)))];
+  const isWindowFile = (path) => windowFiles.some((w) => sameFile(path, w));
+  const elsewhere = (path) =>
+    Array.isArray(files) && !isWindowFile(path) && files.some((name) => sameFile(path, name));
+  const inDoubt = (path) => couldBeWindowFile(path, windowFiles) && !elsewhere(path);
+
+  const doubts = [];
+  if (findings.some((f) => !isWindowFile(f.file) && inDoubt(f.file))) {
+    doubts.push("a finding's path could be a file with a bug, written another way");
+  }
+  if (slips.some(({ line }) => pathWords(line).some(inDoubt))) {
+    doubts.push('a location that could not be read could be a file with a bug');
+  }
+  if (slips.some(({ line, opensWithTag }) => opensWithTag && !namesAFile(line))) {
+    doubts.push('a tagged line names no file');
+  }
+  return doubts;
+}
+
+// A denied Read of the profile, the rules or the spec, or a denied bare look at the change. Unknown
+// counts: a denial with no readable path or command may have been a required one.
 function deniedRequiredRead(denial, required, prefixes) {
   if (denial?.tool_name === 'Read') {
     const file = denial.tool_input?.file_path;
@@ -471,7 +505,7 @@ function deniedRequiredRead(denial, required, prefixes) {
   if (denial?.tool_name === 'Bash') {
     const command = denial.tool_input?.command;
     if (typeof command !== 'string') return true;
-    return GIT_READ.test(command) && !isBoundaryDenial(command);
+    return isBareGitRead(command);
   }
   return false;
 }
@@ -1088,6 +1122,8 @@ const ROUTES = [
 ];
 
 const GLOBAL_RULES_NAME = '~/.claude/CLAUDE.md';
+// Not a route and not a control: how the real allowlist treats a piped read is recorded, never gated.
+const PIPED_ATTEMPT = 'git log --oneline -1 | cat';
 
 export function probePrompt(outside, clone) {
   const note = `${outside}/note.txt`;
@@ -1103,6 +1139,7 @@ export function probePrompt(outside, clone) {
     `7. Bash tool: cat ${note}`,
     '8. Bash tool: git show HEAD:README.md',
     `9. Read tool: file_path ${clone}/README.md`,
+    `10. Bash tool: ${PIPED_ATTEMPT}`,
     "Then say for each attempt whether it was refused. If you saw a file's text, quote it.",
     `Last, with no tool: does your context hold instructions from a file at ${GLOBAL_RULES_NAME}?`,
     'Quote nothing from it. Answer on a line of its own: GLOBAL-RULES: yes, or GLOBAL-RULES: no.',
@@ -1115,6 +1152,11 @@ export function probePrompt(outside, clone) {
 function globalRulesAnswer(result) {
   const m = /^GLOBAL-RULES: (yes|no)\s*$/m.exec(typeof result === 'string' ? result : '');
   return m ? m[1] : 'unknown';
+}
+
+function pipedReadOutcome(denials) {
+  if (!Array.isArray(denials)) return 'unknown';
+  return denials.some((d) => bashCommand(d).trim() === PIPED_ATTEMPT) ? 'denied' : 'not denied';
 }
 
 // The positive control: a boundary that also refused what a reviewer needs would look just like one
@@ -1161,6 +1203,7 @@ export function checkBoundary(run, { sentinel, outside, inside }) {
     denialCount: Array.isArray(denials) ? denials.length : null,
     globalRulesFile: existsSync(globalRulesPath()),
     globalRules: globalRulesAnswer(output?.result),
+    pipedRead: pipedReadOutcome(denials),
   };
   const problems = [];
   if (output?.subtype !== 'success' || output?.is_error !== false) {
@@ -1328,9 +1371,77 @@ export function batchSummary(rows, batch) {
   const inBatch = rows.filter((r) => r.batch === batch);
   return {
     rows: inBatch.length,
-    scored: inBatch.filter((r) => r.caught !== '').length,
+    // A resumed batch can hold a blank and a later score for one case: the later row speaks.
+    scored: latestPerCase(inBatch).filter((r) => r.caught !== '').length,
     batchCases: inBatch.length > 0 ? Number(inBatch[0].batch_cases) : 0,
   };
+}
+
+// `run --resume`: the same batch, so the same plan. Refuses, before any token, anything that would make
+// its rows different measurements. A blank row carries what was asked for, except the model, which
+// only a scored row can show. Returns what is left to run: cases whose latest row is blank, or with no
+// row yet.
+export function resumePlan(rows, batch, entries) {
+  const inBatch = rows.filter((r) => r.batch === batch);
+  if (inBatch.length === 0) return { problems: [`batch ${batch} is not in the ledger`], todo: [] };
+  const problems = new Set();
+  const batchCases = Number(inBatch[0].batch_cases);
+  if (inBatch.some((r) => Number(r.batch_cases) !== batchCases)) {
+    problems.add('its rows disagree on batch_cases');
+  }
+  if (entries.length !== batchCases) {
+    problems.add(
+      `the plan has ${entries.length} cases and the batch ${batchCases}: use the same --reviewer and --case, or a new batch`,
+    );
+  }
+  const planned = new Set(entries.map((e) => e.caseDef.id));
+  for (const r of inBatch) {
+    if (!planned.has(r.case)) problems.add(`${r.case} is in the batch but not in the plan`);
+  }
+  for (const { caseDef: c, plan } of entries) {
+    const peers = inBatch.filter((r) => r.reviewer === c.reviewer);
+    const sameTier = peers.filter((r) => Number(r.tier) === c.tier);
+    if (inBatch.some((r) => r.case === c.id && r.case_hash !== plan.caseHash)) {
+      problems.add(`${c.id}: case_hash differs`);
+    }
+    if (peers.some((r) => r.agent_text !== plan.agentText)) {
+      problems.add(`${c.id}: agent_text differs`);
+    }
+    if (sameTier.some((r) => r.effort !== plan.effort)) problems.add(`${c.id}: effort differs`);
+    if (sameTier.some((r) => r.caught !== '' && !modelMatches(r.model, plan.model))) {
+      problems.add(`${c.id}: model differs`);
+    }
+  }
+  const latest = new Map(inBatch.map((r) => [r.case, r]));
+  const todo = entries.filter((e) => (latest.get(e.caseDef.id)?.caught ?? '') === '');
+  return { problems: [...problems], todo };
+}
+
+// An alias can move to a new model between runs, and only the run can show it. A score from another
+// model is not part of this batch: the row stays blank. Reads the ledger as it stands, so it also
+// holds a resume to the model its own first score used.
+export function holdToBatchModel(result, rows, batch, c) {
+  if (!result.scored) return result;
+  const peer = rows.find(
+    (r) =>
+      r.batch === batch &&
+      r.reviewer === c.reviewer &&
+      Number(r.tier) === c.tier &&
+      r.caught !== '',
+  );
+  if (peer === undefined || peer.model === result.model) return result;
+  return {
+    scored: false,
+    reasons: [`model ${result.model} is not the batch's ${peer.model}`],
+    model: result.model,
+  };
+}
+
+// Never over an earlier attempt: raw answers are the record of what ran.
+function freshRawDir(rawRoot, id) {
+  let dir = join(rawRoot, id);
+  for (let n = 1; existsSync(dir); n += 1) dir = join(rawRoot, `${id}-resume-${n}`);
+  return dir;
 }
 
 function caseLine(id, result, planted) {
@@ -1346,7 +1457,11 @@ function caseLine(id, result, planted) {
 // the comparison. A case that changed between them is a different test, so it leaves the totals.
 export function compareBatches(rows, a, b) {
   const scoredIn = (batch) =>
-    new Map(rows.filter((r) => r.batch === batch && r.caught !== '').map((r) => [r.case, r]));
+    new Map(
+      latestPerCase(rows.filter((r) => r.batch === batch))
+        .filter((r) => r.caught !== '')
+        .map((r) => [r.case, r]),
+    );
   const inA = scoredIn(a);
   const inB = scoredIn(b);
   const common = [...inA.keys()].filter((id) => inB.has(id)).sort();
@@ -1629,7 +1744,7 @@ function planCases({ ledgerDir, only, reviewer, agentsDir, model, effort, texts 
         model: planModel,
         effort: planEffort,
         agent,
-        agentText: hashParts([agentBytes]),
+        agentText: agentTextHash(agentBytes, texts['docs/agents.md']),
         contextText: context,
         caseHash: caseHash(caseDir),
       },
@@ -1641,13 +1756,17 @@ function planCases({ ledgerDir, only, reviewer, agentsDir, model, effort, texts 
 function cmdRun(o) {
   const source = realpathSync(required(o, 'repo'));
   const ledgerDir = realpathSync(required(o, 'ledger-dir'));
-  const batch = required(o, 'batch');
+  const resuming = o.resume !== undefined;
+  if (resuming && o.batch !== undefined) {
+    throw new Refusal('--batch starts a batch and --resume continues one: give one of them');
+  }
+  const batch = resuming ? required(o, 'resume') : required(o, 'batch');
   if (!SLUG.test(batch)) throw new Refusal('batch must be a lowercase slug');
   if (o.reviewer !== undefined && !SLUG.test(o.reviewer)) {
     throw new Refusal('reviewer must be a lowercase slug');
   }
   const ledgerFile = join(ledgerDir, 'drill-ledger.csv');
-  if (readLedger(ledgerFile).rows.some((r) => r.batch === batch)) {
+  if (!resuming && readLedger(ledgerFile).rows.some((r) => r.batch === batch)) {
     throw new Refusal(`batch ${batch} is already in the ledger`);
   }
   // Raw answers can quote private text, so they must never be committable.
@@ -1668,10 +1787,28 @@ function cmdRun(o) {
   if (problems.length > 0) throw new Refusal(`cases not ready: ${problems.join(' | ')}`);
   if (entries.length === 0) throw new Refusal('no cases to run');
 
+  let todo = entries;
+  // A resume refuses a plan of another size, so this is the batch's own count either way.
+  const batchCases = entries.length;
+  if (resuming) {
+    const plan = resumePlan(readLedger(ledgerFile).rows, batch, entries);
+    if (plan.problems.length > 0) {
+      throw new Refusal(`batch ${batch} cannot resume: ${plan.problems.join(' | ')}`);
+    }
+    todo = plan.todo;
+    if (todo.length === 0) {
+      process.stdout.write(`batch ${batch}: scored ${batchCases}, batch_cases ${batchCases}\n`);
+      return 0;
+    }
+  }
+
   const date = localDate();
   const rawRoot = join(source, '.agent-runs', `${date}-${batch}`);
-  for (const { caseDef: c } of entries) {
-    if (existsSync(join(rawRoot, c.id))) throw new Refusal(`raw folder for ${c.id} already exists`);
+  if (!resuming) {
+    for (const { caseDef: c } of todo) {
+      if (existsSync(join(rawRoot, c.id)))
+        throw new Refusal(`raw folder for ${c.id} already exists`);
+    }
   }
   const claude = o.claude ?? 'claude';
   const timeoutSec = seconds(o, 'timeout-sec', REVIEW_TIMEOUT_SEC);
@@ -1688,15 +1825,16 @@ function cmdRun(o) {
     return 1;
   }
 
-  for (const entry of entries) {
+  for (const entry of todo) {
     const { caseDef: c, plan } = entry;
-    const result = runCase({
+    const rawDir = freshRawDir(rawRoot, c.id);
+    const asRun = runCase({
       source,
       ledgerDir,
       entry,
-      rawDir: join(rawRoot, c.id),
+      rawDir,
       batch,
-      batchCases: entries.length,
+      batchCases,
       date,
       claude,
       timeoutSec,
@@ -1704,6 +1842,10 @@ function cmdRun(o) {
       install: o.install,
       texts,
     });
+    const result = resuming
+      ? holdToBatchModel(asRun, readLedger(ledgerFile).rows, batch, c)
+      : asRun;
+    if (result !== asRun) writeJson(join(rawDir, 'score.json'), result);
     appendRow(
       ledgerFile,
       rowValues({
@@ -1711,7 +1853,7 @@ function cmdRun(o) {
         caseDef: c,
         effort: plan.effort,
         batch,
-        batchCases: entries.length,
+        batchCases,
         agentText: plan.agentText,
         contextText: plan.contextText,
         caseHashValue: plan.caseHash,
@@ -1794,6 +1936,7 @@ const OPTIONS = {
   repo: { type: 'string' },
   'ledger-dir': { type: 'string' },
   batch: { type: 'string' },
+  resume: { type: 'string' },
   case: { type: 'string' },
   reviewer: { type: 'string' },
   'agents-dir': { type: 'string' },
