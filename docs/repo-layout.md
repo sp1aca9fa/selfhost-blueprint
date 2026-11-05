@@ -9,6 +9,7 @@ myapp/
   .claude/settings.json     sandbox baseline and hooks (committed)
   .claude/settings.local.json   personal permissions and domains (git-ignored)
   .github/workflows/ci.yml  checks and build on every push
+  .github/workflows/process.yml   commit trailers against changed files (no effect on the server)
   README.md                 what it is, quick start with a demo seed, the guide table
   REQUIREMENTS.md           built from docs/requirements/ (never edited by hand)
   docs/
@@ -27,10 +28,10 @@ myapp/
     content/                every user-facing string (next-intl; en.json is the base)
     plugin-sdk/             the plug-in contract, the HTTP client, the job CLI
   plugins-public/           public plug-ins and the plug-in template
-  ops/                      generic server and PC scripts, systemd unit templates
+  ops/                      generic server and PC scripts, systemd unit templates, the process check
   scripts/                  dev tooling (docs build, typecheck of private plug-ins, crawl)
   private/                  the private submodule (not checked out in CI or by others)
-  .agent-runs/              Claude's run logs (git-ignored)
+  .agent-runs/              Claude's run logs, raw drill answers (git-ignored)
 ```
 
 ## Private submodule
@@ -45,6 +46,9 @@ private/
     actions-done.md         what the owner finished or decided, newest first
     agent-ledger.csv        one row per reviewer run
     run-ledger.csv          one row per task (tiers, retries, owner stops, escapes)
+    drill-ledger.csv        one row per drill case run, appended only by the runner
+    drills/                 drill cases and their keys, never public
+    process-reviewed.txt    shas of commits the process audit lists that a session has looked at
     server-output/          output the owner pasted from the server, for Claude to read
     *.sh                    personal scripts
   docs/                     private docs that are more than notes

@@ -20,7 +20,7 @@ touch). The highest tier among them wins. Log the tier with the file or trigger 
 
 | Tier | What | Examples | Handling |
 |---|---|---|---|
-| 0 | Nothing a user, a job or the data can notice | docs, notes, comments, tests only, a rename with unchanged tests, config with no behavior change | no spec; CHECKS only; never reviewed "to be safe" |
+| 0 | Nothing a user, a job or the data can notice | docs, notes, comments, tests only, a rename with unchanged tests, config with no behavior change | no spec; CHECKS only; never reviewed "to be safe" (one exception: `Mode: actions`, section 6) |
 | 1 | Behavior changes, none in trust territory | CLI output and glue, dev tooling, ops scripts that write no stored data, UI that shows no numbers, signals or money, new texts | spec; `builder`; CHECKS; `code-reviewer-light` (+ `ux-reviewer` if visible) |
 | 2 | Any file on the profile's trust-territory paths, or a new page | data collection and parsing, checks, calculations, money, alerts, auth and access, migrations, backups and restore, imports, deletes, server scripts that deploy or write data | spec; `builder-heavy`; CHECKS; `code-reviewer` (+ `ux-reviewer`, `trust-reviewer` if visible); logic fixes re-reviewed |
 | 3 | Tier 2 that the normal loop cannot verify (triggers below) | a backfill on real data, a new hash-chain format, the self-update path, a check's own code | section 2 |
@@ -29,7 +29,7 @@ Tier 3 triggers (only these, never mere doubt):
 - a. An irreversible action on real data: a rewrite or drop in a migration, a backfill, a bulk
   delete, a restore.
 - b. The safety net's own code: data checks, health grading, gates, CI, fault injection, alert
-  delivery.
+  delivery, this loop's review steps, a reviewer agent's text (section 2, step 7).
 - c. An integrity format: hashed or append-only records, canonical serialization, the backup
   format, signatures; authentication or cryptography design (not a routine access check).
 - d. A change across repos or the server at once: deploy and self-update, systemd units,
@@ -59,6 +59,13 @@ The strongest automated layer, before anything reaches the owner.
    `triage` merges.
 6. Fixes: at most 2 rounds. Still open: one different approach or a smaller scope (a new plan,
    the same steps). Still open: to the owner.
+7. Setup edits (the loop's review steps, a reviewer's text, the profile's domain checklist):
+   `claude/` is live on save, so draft in the run folder. Before it lands or counts as done, rerun
+   the drills for the affected reviewers (section 7), a text edit with
+   `--agents-dir <draft folder> --reviewer <name>`. A lower caught count than the last complete
+   batch goes to the owner with the numbers, quoting the n `drill.mjs compare` printed. The view's
+   text hash sees only the reviewer's own file and that checklist, so reports keep a loop edit's
+   batch under Open issues until it exists.
 
 ## 3. Models and efforts
 
@@ -110,14 +117,20 @@ Then:
    `triage` with two or more. Fix what is right, take the recommended option on cosmetic asks,
    skip what is wrong; owner choices to the actions file. Fixes in one batch. Re-review only
    Tier 2 and 3 logic fixes, by the reviewer that found them. At most 2 fix rounds.
-8. Commit files by name (never `git add -A`); the owner pushes.
+8. Commit files by name (never `git add -A`); the owner pushes. Each commit of a Tier 1-3 task ends
+   with `Ship-Task: <slug>` (public once pushed: no private names) and `Ship-Tier: <n>`, in one
+   paragraph with the attribution. Each task's last commit before a planned push adds `Ship-Reviews:`
+   the reviewers that ran (Tier 3: `code-reviewer, triage`); with nothing left to fix, an
+   `--allow-empty` commit carries it. A Tier 0 change on a code path (comment only, a rename) carries
+   the first two plus `Ship-Tier-Why: <reason>`. When `ops/process-check.json` exists, run
+   `node ops/process-check.mjs origin/main` at the task's end, so CI is only the backstop (rules:
+   the blueprint's `docs/ci.md`).
 9. Log: `.agent-runs/<date>-<slug>/log.md` (tier and why, chunks, gate results, finding counts,
-   decisions). One row per reviewer run in the agent ledger
-   (`date,slug,tier,reviewer,findings,accepted,rejected,duplicate`) and one row per task in the
-   run ledger
-   (`date,slug,tier,final_tier,builder_retries,checks_failures,fix_rounds,owner_stops,escape_of`;
-   `escape_of`: when the task fixes a bug an earlier review let through, that task's slug).
-   Update the actions file (section 6).
+   decisions). One row per reviewer run in the agent ledger and one per task in the run ledger, by
+   each file's header row. `model`, `effort`: what the agent was started with. `builder_model`,
+   `builder_effort`: the builder that finished the task, blank if none ran. `escape_of`: when the
+   task fixes a bug an earlier review let through, that task's slug. Update the actions file
+   (section 6).
 10. `summarizer` for long logs, check output, crawl reports or pasted server output.
 
 ## 6. Writing for the owner (the actions file)
@@ -131,11 +144,20 @@ Each item, 5-20 lines:
 - Exactly what to do or answer (a command block marks every part to replace as
   `<<IN_CAPITALS>>`, with a line before it saying what to replace and where to find it).
 
+A command step is run first on a throwaway copy, and its expected output comes from that run. A
+step that can only run on the server says `Not rehearsed: <why>`. When items with commands were
+added or changed: once per task, `code-reviewer-light` with `Mode: actions`, the file's path and the
+item ids; one ledger row, reviewer `code-reviewer-light-actions`.
+
 Done items, settled decisions and read comments move to the done file, newest first, dated.
 
 ## 7. Setup review (every 10 tasks or every month, whichever comes first)
 
-Read both ledgers. Triggers:
+Read the ledgers and the global view (`node "$T/setup-view.mjs"`, with
+`T=$(readlink -f ~/.claude/commands)/../../tools`). When the project has the process check, also
+`node ops/process-check.mjs --audit --reviewed <ledger folder>/process-reviewed.txt` and the
+process runs since the last review
+(`gh run list --workflow Process --limit 100`). Triggers:
 - A reviewer over 70% rejected in its last 4 runs (noisy), or with no accepted finding of its
   own in its last 3 (redundant): propose going lighter or dropping it. Not for the challenger
   (section 8).
@@ -144,10 +166,32 @@ Read both ledgers. Triggers:
   trust-territory paths.
 - Owner stops rising over 3 reviews: propose standing rules for the repeated kinds.
 - Builder retries in more than 1 in 3 tasks: propose a stronger builder or smaller chunks.
+- `--audit` shows an open task: run its missing review. Its `unclaimed` commits have no task to
+  close, and closing one would need a history rewrite: look at each `unreviewed` one, then add its
+  sha to that file; only `unreviewed` above 0 is open. Log the count of red process runs; none at all
+  despite pushes: the check may have gone quiet, so look at the workflow.
 
 Each proposal goes into the actions file (section C) with its numbers. The setup changes only
 when the owner agrees; the profile's "Setup changes" records the date and the reason. A lesson
-that holds for every project goes to the blueprint.
+that holds for every project goes to the blueprint. A proposal may rest on evidence from other
+projects (acceptance only hints; drill scores are the basis for comparing models), but is written
+per project, in each affected project's actions file, against its risk class: never below its class
+table. A change to the class table itself is a blueprint change the owner approves.
+
+Drills measure what reviews miss (commands, cases, limits: the blueprint's `docs/claude-setup.md`).
+- One batch per setup review, per project: 4-6 cases at the profile's models and efforts; others
+  only for a named comparison.
+- `builder-heavy` writes the cases. The main session never opens them and reads only counts. Never
+  tune a reviewer's text to a case; a case seen while editing an agent is retired.
+- A batch is one owner command in the actions file, because a session's sandbox refuses the network
+  it needs. If `drill.mjs probe` ever exits 0 from a session, that session may run the same command;
+  nothing else changes.
+- Done only when the view prints `current, scored N of N` for the reviewer: a batch for its own
+  text and the domain checklist at the profile's model and effort, covering its active cases. A
+  later comparison cannot reopen it. Until then the item stays in the actions file and reports keep
+  the view's `no batch for current text` or `batch incomplete` under Open issues. A command written
+  is not a batch run. `context changed since the batch of <date>` (the rest of the profile or the
+  rules moved) is information only: no item, no Open issue.
 
 ## 8. The challenger (direction, not code)
 

@@ -26,6 +26,21 @@ Check, most important first:
 If the change touches the profile's trust territory, say so as the first finding: it needs the
 Tier 2 review.
 
+Mode (named in the prompt; otherwise the normal review above):
+- `Mode: actions`: you receive the path of the owner's actions file and the ids of the items added
+  or changed, not a commit range, a spec or CHECKS output. Read the profile and rules as above, then
+  the whole file: an earlier step still open binds the steps after it. Take the owner's place: they
+  run each step literally, top to bottom, knowing only this file. For each given item:
+  1. Contradictions: it says something about a command, a state or a result that another open
+     item says differently.
+  2. Order: it needs something a later step produces, or an earlier step needs something it
+     produces, or it undoes an earlier step.
+  3. Stale values: each hash, branch, path, script, flag and file it names exists and is still what
+     the item says. Check with read-only commands and the file tools.
+  4. Output: its expected output cannot come from its command, or a command step has neither an
+     expected output nor `Not rehearsed: <why>`.
+  Never run a command from the file. Findings name the actions file's path and line.
+
 Skip style points the linter does not flag. Skip anything you cannot tie to a concrete failure.
 Verify a finding against the code before reporting it.
 

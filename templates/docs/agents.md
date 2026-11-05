@@ -26,6 +26,7 @@ scripts>.
 Paths (a changed file here makes the change Tier 2; Tier 3 triggers are in `/ship`):
 - <`packages/core/`, `packages/db/`, ...>
 - <single files: `ops/update-server.sh`, ...>
+- `ops/ci-status.sh`, `ops/process-check.mjs`, `ops/process-check.json`, `.github/workflows/`
 
 ## Domain checklist
 
@@ -78,6 +79,8 @@ The orchestrator passes these values as `model` and `effort` when it starts each
   (+ ux-reviewer, trust-reviewer if visible).
 - Tier 3: code-reviewer on the plan, then code-reviewer normal and adversarial, triage
   (+ ux-reviewer, trust-reviewer if visible).
+- Owner's actions file: code-reviewer-light with `Mode: actions`, once per task, when items with
+  commands changed.
 - Page crawler for screenshots: <command, or "not yet">.
 
 ## Paths

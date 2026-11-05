@@ -21,8 +21,10 @@
       "patterns": ["packages/core/", "packages/db/"]
     },
     "<single files: `ops/update-server.sh`, ...>": {
+      "patterns": ["ops/update-server.sh"]
+    },
+    "`ops/ci-status.sh`, `ops/process-check.mjs`, `ops/process-check.json`, `.github/workflows/`": {
       "patterns": [
-        "ops/update-server.sh",
         "ops/ci-status.sh",
         "ops/process-check.mjs",
         "ops/process-check.json",
