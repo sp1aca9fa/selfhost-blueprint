@@ -98,7 +98,9 @@ uncommitted changes is not updated. The restart needs a sudoers rule allowing on
 
 It updates only to a commit GitHub CI passed on (`ops/ci-status.sh <sha>` reads the commit's check
 runs; no token for a public repo), and to exactly that commit even when a later one arrived
-meanwhile. While CI runs, or when GitHub gives no usable answer (no network, an error, its rate
+meanwhile. The main repo's `origin` must say `github.com`: clone a public repo from its https
+address, which needs no key. With an ssh host alias as origin, the script answers `unknown` for
+every commit and the server never updates (the private submodule's alias is fine). While CI runs, or when GitHub gives no usable answer (no network, an error, its rate
 limit), nothing changes and the next tick asks again, logging once per commit and status; after 24
 hours without an update (counted from the server's own commit, so newer pushes do not restart it; an update or a reported CI failure does)
 the admins are told once. A failed CI run is treated like a failed update, at once (not retried
