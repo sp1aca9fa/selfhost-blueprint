@@ -46,13 +46,14 @@ Moves:
 
 The strongest automated layer, before anything reaches the owner.
 1. Plan: `builder-heavy` (Tier 3 row) writes `.agent-runs/<date>-<slug>/plan.md`: the change,
-   how it could fail silently, how it is undone, how it is rehearsed, the expected rehearsal
-   output. `code-reviewer` reviews the plan (`Mode: plan`) before any code; one round of plan
+   its expected gain and size limit (section 5 step 3), how it could fail silently, how it is
+   undone, how it is rehearsed, the expected rehearsal output. `code-reviewer` reviews the plan (`Mode: plan`) before any code; one round of plan
    fixes.
 2. Build from the plan.
 3. Rehearse every irreversible step on a copy (synthetic data or a backup copy) with a tested
-   way back; the output must match the plan's expected output. The real run on the server is
-   then one owner step with the rehearsal's evidence attached.
+   way back; the output must match the plan's expected output. While fixing, rehearse on a small
+   sample; the evidence is one full run at the end. The real run on the server is then one owner
+   step with the rehearsal's evidence attached.
 4. Safety-net changes (trigger b): fault injection shows every fault caught before is still
    caught.
 5. Review in parallel: `code-reviewer` (normal) and `code-reviewer` with `Mode: adversarial`;
@@ -104,11 +105,28 @@ Then:
    acceptance criteria, the requirement sections it rests on (point, don't copy), pages touched,
    tier. Unclear current-stage details: the conservative reading, under "Assumed". Unclear
    later-stage details: left out and put to the owner.
+   A new feature or one-off also states its expected gain, in numbers, and a size limit in lines.
+   When a measured gain comes in small (a review's "adds 1 of 34") or the limit breaks, stop before
+   adding guards, fix rounds or stop tests: the main session compares gain and cost, then drops or
+   shelves the feature or records in the log why it goes on. Dropping something the owner asked
+   for by name is an owner choice (section 4). Nothing the requirements or the domain checklist
+   require is dropped this way.
 4. Build chunk by chunk: `builder` for Tier 1, `builder-heavy` for Tier 2 and 3, design, an
    ambiguous spec, or after a builder failed. Give the spec path, the chunk and CHECKS; never
    paste code. Small changes the project's `CLAUDE.md` names, the main session does itself (an
-   agent starts cold).
-5. Gates: CHECKS; on failure back to the builder, at most 2 tries. Visible changes: the page
+   agent starts cold). To keep builders cheap:
+   - Each agent's description starts `<slug>: `, so spend can be counted per task.
+   - A start map goes in the builder's prompt: the files to read first and the facts already
+     settled. Never in the spec, since reviewers read the spec and should look for themselves.
+   - A new chunk gets a new builder.
+   - An agent that will run a long job (a rehearsal) is started in the background. It runs the job
+     with `run_in_background`, ends its turn and wakes on the exit notice. Never poll a log: each
+     poll re-reads the whole context.
+   - The main session makes small fixes itself (a few lines, one area). A subagent's cache lasts about 5 minutes, so
+     resuming one that sat idle longer rewrites its whole context: past about 150k, start a fresh
+     builder with the spec, the log and the findings instead.
+5. Gates: CHECKS; on failure a small fix by the main session, otherwise back to a builder (step
+   4), at most 2 tries. Visible changes: the page
    crawler once for the changed pages, when the profile names one.
 6. Review: the tier's reviewers in one message (parallel). Code reviewers get the commit range
    (or the working tree), the spec path and the CHECKS output. UX and trust reviewers get only
@@ -128,9 +146,13 @@ Then:
 9. Log: `.agent-runs/<date>-<slug>/log.md` (tier and why, chunks, gate results, finding counts,
    decisions). One row per reviewer run in the agent ledger and one per task in the run ledger, by
    each file's header row. `model`, `effort`: what the agent was started with. `builder_model`,
-   `builder_effort`: the builder that finished the task, blank if none ran. `escape_of`: when the
-   task fixes a bug an earlier review let through, that task's slug. Update the actions file
-   (section 6).
+   `builder_effort`: the builder that finished the task, blank if none ran. `severe`: accepted
+   findings that would have cost days of wrong values or lasting harm if shipped. `fix_caused`:
+   findings aimed at code an earlier fix in the same task added. `escape_of`: when the task fixes a
+   bug an earlier review let through, that task's slug, whoever found the bug, the owner included.
+   The main session saves each reviewer's report in full as `reports/<reviewer>-<round>.md` in the
+   run folder.
+   Update the actions file (section 6).
 10. `summarizer` for long logs, check output, crawl reports or pasted server output.
 
 ## 6. Writing for the owner (the actions file)
@@ -154,8 +176,9 @@ Done items, settled decisions and read comments move to the done file, newest fi
 
 ## 7. Setup review (every 10 tasks or every month, whichever comes first)
 
-Read the ledgers and the global view (`node "$T/setup-view.mjs"`, with
-`T=$(readlink -f ~/.claude/commands)/../../tools`). When the project has the process check, also
+Read the ledgers, the global view (`node "$T/setup-view.mjs"`, with
+`T=$(readlink -f ~/.claude/commands)/../../tools`) and the spend since the last review
+(`node "$T/spend-view.mjs" --since <date>`). When the project has the process check, also
 `node ops/process-check.mjs --audit --reviewed <ledger folder>/process-reviewed.txt` and the
 process runs since the last review
 (`gh run list --workflow Process --limit 100`). Triggers:
@@ -167,6 +190,8 @@ process runs since the last review
   trust-territory paths.
 - Owner stops rising over 3 reviews: propose standing rules for the repeated kinds.
 - Builder retries in more than 1 in 3 tasks: propose a stronger builder or smaller chunks.
+- A spend pool over 10% of the total, or most of a review round's findings `fix_caused`: propose
+  how to shrink it, without cutting a review the drills have not measured.
 - `--audit` shows an open task: run its missing review. Its `unclaimed` commits have no task to
   close, and closing one would need a history rewrite: look at each `unreviewed` one, then add its
   sha to that file; only `unreviewed` above 0 is open. Log the count of red process runs; none at all

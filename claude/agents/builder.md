@@ -3,6 +3,7 @@ name: builder
 description: Implements one routine chunk of a spec (tests, glue, docs, ops scripts, UI without the project's risky logic) in a project with an agent profile (docs/agents.md). Not for trust territory; use builder-heavy.
 model: sonnet
 effort: medium
+autoCompactWindow: 200000
 tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 

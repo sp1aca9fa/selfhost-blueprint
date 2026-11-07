@@ -316,6 +316,54 @@ describe('reading old and new rows', () => {
     assert.equal(group.counts.findings, 4, 'the old row adds nothing to the group');
   });
 
+  it('reads a ledger still on the middle header, and rates none of its rows', () => {
+    const root = newRoot();
+    const middleRow = '2026-01-02,task-one,2,code-reviewer,4,2,1,1,opus,high';
+    addProject(root, 'alpha', { agent: lines(HEADERS.agent.middle.join(','), middleRow) });
+    const v = view(root);
+    assert.equal(v.totals.agent.grouped, 1);
+    const [group] = groupList(v.groups.agent);
+    assert.equal(group.counts.rated, 0);
+    assert.match(renderView(v), /severe 0, fix caused 0 \(rated 0 of 1\)/);
+  });
+
+  it('treats a severity-width row under the middle header as malformed', () => {
+    const root = newRoot();
+    addProject(root, 'alpha', { agent: lines(HEADERS.agent.middle.join(','), agentRow({ severe: '1', fix_caused: '0' })) });
+    assert.equal(view(root).totals.agent.malformed, 1);
+  });
+
+  it('sums severity only over rows that state both columns', () => {
+    const root = newRoot();
+    const middleRow = '2026-01-02,task-one,2,code-reviewer,4,2,1,1,opus,high';
+    addProject(root, 'alpha', {
+      agent: lines(
+        AGENT_NEW,
+        middleRow,
+        agentRow({ severe: '2', fix_caused: '3' }),
+        agentRow({ severe: '0', fix_caused: '0' }),
+        agentRow({ severe: '5', fix_caused: '' }),
+      ),
+    });
+    const [group] = groupList(view(root).groups.agent);
+    assert.equal(group.counts.runs, 4);
+    assert.equal(group.counts.rated, 2);
+    assert.equal(group.counts.severe, 2);
+    assert.equal(group.counts.fixCaused, 3);
+  });
+
+  it('calls a severity that is not a count malformed', () => {
+    const root = newRoot();
+    addProject(root, 'alpha', { agent: lines(AGENT_NEW, agentRow({ severe: 'x', fix_caused: '0' })) });
+    assert.equal(view(root).totals.agent.malformed, 1);
+  });
+
+  it('calls an old row with four extra commas malformed, not a severity row', () => {
+    const root = newRoot();
+    addProject(root, 'alpha', { agent: lines(AGENT_NEW, '2026-01-01,a,b,c,d,task-old,2,code-reviewer,5,3,1,1') });
+    assert.equal(view(root).totals.agent.grouped, 0);
+  });
+
   it('counts a new-width row with a blank model as no model', () => {
     const root = newRoot();
     addProject(root, 'alpha', { agent: lines(AGENT_NEW, agentRow({ model: '', effort: '' })) });
@@ -1396,8 +1444,10 @@ describe('templates', () => {
   });
 
   it('the ledger columns only add at the end, as the design says', () => {
-    assert.deepEqual(HEADERS.agent.new.slice(-2), ['model', 'effort']);
-    assert.deepEqual(HEADERS.agent.new.slice(0, HEADERS.agent.old.length), HEADERS.agent.old);
+    assert.deepEqual(HEADERS.agent.new.slice(-2), ['severe', 'fix_caused']);
+    assert.deepEqual(HEADERS.agent.middle.slice(-2), ['model', 'effort']);
+    assert.deepEqual(HEADERS.agent.new.slice(0, HEADERS.agent.middle.length), HEADERS.agent.middle);
+    assert.deepEqual(HEADERS.agent.middle.slice(0, HEADERS.agent.old.length), HEADERS.agent.old);
     assert.deepEqual(HEADERS.run.new.slice(-2), ['builder_model', 'builder_effort']);
     assert.deepEqual(HEADERS.run.new.slice(0, HEADERS.run.old.length), HEADERS.run.old);
     assert.deepEqual(HEADERS.drill.new.slice(0, 10), [

@@ -64,7 +64,7 @@ start of every session and updates it after every piece of work.
 - `actions-done.md`: what the owner marked done or decided, newest first, dated; the work log.
 - `notes.md`: the owner's setup, sources' quirks, Claude's own to-dos.
 - `agent-ledger.csv`: one row per reviewer run,
-  `date,slug,tier,reviewer,findings,accepted,rejected,duplicate,model,effort`.
+  `date,slug,tier,reviewer,findings,accepted,rejected,duplicate,model,effort,severe,fix_caused`.
 - `run-ledger.csv`: one row per task,
   `date,slug,tier,final_tier,builder_retries,checks_failures,fix_rounds,owner_stops,escape_of,builder_model,builder_effort`.
 - `drill-ledger.csv`: one row per case run, appended only by the runner,
@@ -73,8 +73,8 @@ start of every session and updates it after every piece of work.
 - `process-reviewed.txt`: one sha per line, commits the process audit lists that a session has looked
   at. A session adds a sha only after looking at that commit.
 
-Rows written before the `model` and `builder_model` columns stay as they are, at the old width:
-never guessed or backfilled. A reader goes by the header row.
+Rows written before the `model`, `builder_model`, `severe` and `fix_caused` columns stay as they
+are, at their old width: never guessed or backfilled. A reader goes by the header row.
 
 ## Checking the setup itself
 
@@ -91,6 +91,12 @@ which changes what a reviewer looks for:
   visible.
 - **Drills**, below: what reviews miss, scored by a script rather than by the session.
 - **The global view**, below: counts across projects, for the setup review.
+- **The spend view** (`tools/spend-view.mjs`): where one project's tokens went, from its transcripts,
+  with no model calls: main session and agents, by role and by task, and the pools that can shrink
+  (cache misses, polling, builders before their first edit, context over 200k). Run it from the
+  project's folder or with `--project`. It shows the shape of the spend, not a bill, and it says
+  nothing about quality; only drills do that. Task rows start with tasks begun after 2026-11-07,
+  when agent descriptions began carrying the slug.
 
 An edit to the loop's review steps or to a reviewer's text is Tier 3 trigger b, and must rerun the
 drills for the affected reviewers before it counts as done (`/ship` section 2).

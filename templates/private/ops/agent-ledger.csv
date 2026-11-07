@@ -1,1 +1,1 @@
-date,slug,tier,reviewer,findings,accepted,rejected,duplicate,model,effort
+date,slug,tier,reviewer,findings,accepted,rejected,duplicate,model,effort,severe,fix_caused

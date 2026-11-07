@@ -3,6 +3,7 @@ name: builder-heavy
 description: Implements chunks in a project's trust territory (as its docs/agents.md profile defines it) or needing judgment - data and calculations, money, auth and access, migrations, backups, architecture, an ambiguous spec, or work the builder failed on.
 model: opus
 effort: high
+autoCompactWindow: 200000
 tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 
@@ -42,6 +43,10 @@ Rules:
 - If the spec contradicts itself or the requirements, or would change something the profile
   lists under "Owner decides", stop and report the question with your recommendation instead of
   guessing.
+- A job that runs for minutes (a rehearsal): have it end in one verdict line, start it with
+  `run_in_background`, and end your turn; the exit notice wakes you. Never poll its log, since each
+  poll re-reads your whole context. While fixing, rehearse on a small sample; do the full run once,
+  at the end.
 - After editing a source file temporarily (a probe or mutation check), restore it with
   `git checkout -- <file>`, never `cp` (`cp` may ask before overwriting and hang the shell).
 

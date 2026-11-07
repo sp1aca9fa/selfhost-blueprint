@@ -9,9 +9,11 @@
 //   not a project. The default root is the parent of this repo.
 // - Counts only. No slug, case id, batch id, hash or file text is printed. A printed group value
 //   must match ^[a-z0-9.-]+$; anything else makes the row malformed, never a printed value.
-// - A ledger is read by its exact header, old or new. A row must have the old or the new width
-//   for that header; any other field count is malformed, counted and excluded. Fields are split
+// - A ledger is read by its exact header, old or new. A row must have the width of that header or
+//   of an older one; any other field count is malformed, counted and excluded. Fields are split
 //   on commas with no quoting rules, so a comma in a slug can only add fields.
+// - `severe` and `fix_caused` count only on rows that state both. An older row is not rated, never
+//   read as 0, and the view says how many runs were rated.
 // - Unknown stays unknown: a risk class that is not exactly A, B or C is `unknown`, a missing
 //   ledger is "no ledger" and not zero, a blank effort beside a model is `unknown`, and a drill
 //   row with `caught` blank adds nothing to `planted` or `caught`.
@@ -77,8 +79,10 @@ const DRILL = [
   'case_hash',
 ];
 
+const AGENT_MODEL = [...AGENT_OLD, 'model', 'effort'];
+
 export const HEADERS = {
-  agent: { old: AGENT_OLD, new: [...AGENT_OLD, 'model', 'effort'] },
+  agent: { old: AGENT_OLD, middle: AGENT_MODEL, new: [...AGENT_MODEL, 'severe', 'fix_caused'] },
   run: { old: RUN_OLD, new: [...RUN_OLD, 'builder_model', 'builder_effort'] },
   drill: { old: null, new: DRILL },
 };
@@ -101,15 +105,31 @@ const ledgerRules = {
       isCount(r.findings) &&
       isCount(r.accepted) &&
       isCount(r.rejected) &&
-      isCount(r.duplicate),
+      isCount(r.duplicate) &&
+      (isBlank(r.severe) || isCount(r.severe)) &&
+      (isBlank(r.fix_caused) || isCount(r.fix_caused)),
     key: (r) => [r.reviewer],
-    zero: () => ({ runs: 0, findings: 0, accepted: 0, rejected: 0, duplicate: 0 }),
+    zero: () => ({
+      runs: 0,
+      findings: 0,
+      accepted: 0,
+      rejected: 0,
+      duplicate: 0,
+      rated: 0,
+      severe: 0,
+      fixCaused: 0,
+    }),
     add(g, r) {
       g.runs += 1;
       g.findings += Number(r.findings);
       g.accepted += Number(r.accepted);
       g.rejected += Number(r.rejected);
       g.duplicate += Number(r.duplicate);
+      if (!isBlank(r.severe) && !isBlank(r.fix_caused)) {
+        g.rated += 1;
+        g.severe += Number(r.severe);
+        g.fixCaused += Number(r.fix_caused);
+      }
     },
   },
   run: {
@@ -235,13 +255,16 @@ export function readLedger(path, kind) {
     .replace(/^﻿/, '')
     .split(/\r?\n/)
     .filter((l) => l.trim() !== '');
-  const { old, new: current } = HEADERS[kind];
+  const { old, middle, new: current } = HEADERS[kind];
   const headerFields = (lines[0] ?? '').split(',');
   let widths;
   let names;
   if (sameHeader(headerFields, current)) {
     names = current;
-    widths = old ? [old.length, current.length] : [current.length];
+    widths = [old, middle, current].filter(Boolean).map((header) => header.length);
+  } else if (middle && sameHeader(headerFields, middle)) {
+    names = middle;
+    widths = [old.length, middle.length];
   } else if (sameHeader(headerFields, old)) {
     names = old;
     widths = [old.length];
@@ -606,7 +629,8 @@ export function renderView(view) {
       const few = c.runs < MIN_RUNS ? ' (too few)' : '';
       return (
         `runs ${c.runs}, findings ${c.findings}, accepted ${c.accepted}, ` +
-        `rejected ${c.rejected}, duplicate ${c.duplicate}${few}`
+        `rejected ${c.rejected}, duplicate ${c.duplicate}, ` +
+        `severe ${c.severe}, fix caused ${c.fixCaused} (rated ${c.rated} of ${c.runs})${few}`
       );
     }),
   );
