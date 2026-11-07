@@ -50,7 +50,8 @@ session loads it only when it does agent work. It holds:
 - **Writing for the owner**: each actions item 5-20 lines, enough to decide on alone; command steps
   rehearsed on a throwaway copy or marked `Not rehearsed: <why>`.
 - **The setup review** every 10 tasks or every month: fixed triggers on the ledgers, the global
-  view, the process audit, one batch of drills; proposals with their numbers to the owner, changes
+  view, the process audit, a batch of drills only if the setup changed; proposals with their numbers
+  to the owner, changes
   recorded in the profile. The setup is fixed between reviews, never frozen.
 
 ## The owner's files (private ops)
@@ -266,7 +267,13 @@ record. It prints no slugs, case ids, hashes or file contents.
 - A later named comparison at other settings is ignored and cannot reopen an owner item. A `--case`
   run covers one case, so it satisfies this only for a reviewer with one active case.
 - A context difference prints one line, `context changed since the batch of <date>`: information
-  only, no actions item, no Open issue.
+  only, no actions item, no Open issue, unless the setup review judges that the edit changes what
+  reviewers look for (`/ship` section 7).
+- A version the alias moved to prints `model version moved since the batch of <date>: <old> to <new>`,
+  which calls for a batch. The view compares the batch's id with the newest id this project's agents
+  ran on, from up to 200 of their newest transcripts; a main session is not read, since its version
+  may be chosen by hand. With no such run it prints `model version not checked, no agent run on this
+  model to compare`: information only, and never read as unchanged.
 - A batch that did not run stays visible this way, and reports keep the line under Open issues until
   the batch exists; a command written is not a batch run. A loop edit changes no hash, so the view
   cannot see it: reports carry that batch by name instead. For a draft text, pass the same

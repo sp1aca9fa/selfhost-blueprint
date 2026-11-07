@@ -13,6 +13,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,6 +36,7 @@ import {
   latestPerCase,
   MIN_PLANTED,
   MIN_RUNS,
+  latestAgentModels,
   modelMatches,
   parseLedgerPaths,
   parseRiskClass,
@@ -797,6 +799,94 @@ describe('which batch speaks for a reviewer', () => {
     textLine(outOf(fixture), `alpha ${name}`).split(': ').slice(1).join(': ');
   const NO_BATCH = 'no batch for current text';
   const BLANK = { caught: '', other_findings: '', malformed: '' };
+
+  describe('model version', () => {
+    const agentLine = (id) => JSON.stringify({ type: 'assistant', message: { id: 'm', model: id } });
+    // `files` is { 'session/subagents/a.jsonl': [line, ...] }, oldest first in the object's order.
+    function outWith(files) {
+      const fixture = setup((row) => [row()]);
+      const dir = join(fixture.root, 'transcripts');
+      Object.entries(files).forEach(([path, rows], i) => {
+        write(join(dir, path), `${rows.join('\n')}\n`);
+        const at = new Date(2026, 0, 1 + i);
+        utimesSync(join(dir, path), at, at);
+      });
+      return renderView(
+        buildView({ root: fixture.root, agentsDir: fixture.agents, transcriptsFor: () => dir }),
+      );
+    }
+    const AGENT = 's1/subagents/a.jsonl';
+
+    it('says nothing when the agents still run on the batch version', () => {
+      assert.doesNotMatch(outWith({ [AGENT]: [agentLine('model-x-1')] }), /model version/);
+    });
+
+    it('names both versions when they differ, and still reads as current', () => {
+      const out = outWith({ [AGENT]: [agentLine('model-x-1'), agentLine('model-x-2')] });
+      assert.match(out, /alpha code-reviewer: current, scored 1 of 1/);
+      assert.match(
+        out,
+        /alpha code-reviewer: model version moved since the batch of \S+: model-x-1 to model-x-2/,
+      );
+    });
+
+    it('goes by the newest transcript', () => {
+      const out = outWith({
+        's1/subagents/old.jsonl': [agentLine('model-x-2')],
+        's2/subagents/new.jsonl': [agentLine('model-x-1')],
+      });
+      assert.doesNotMatch(out, /model version/);
+    });
+
+    it('says when there is nothing to compare, never reading that as unchanged', () => {
+      const notChecked = /alpha code-reviewer: model version not checked/;
+      assert.match(outWith({}), notChecked);
+      assert.match(outWith({ [AGENT]: [agentLine('model-y-1')] }), notChecked);
+      assert.match(
+        outWith({ [AGENT]: ['not json', agentLine('<synthetic>'), '{"model":"model-x-2"}'] }),
+        notChecked,
+      );
+    });
+
+    it('ignores a main session, which may be on a version chosen by hand', () => {
+      // The real layout, with the main session newest: a reader of it would see the other version.
+      const out = outWith({ [AGENT]: [agentLine('model-x-1')], 's1.jsonl': [agentLine('model-x-2')] });
+      assert.doesNotMatch(out, /model version/);
+    });
+
+    it('resolves an alias by family, across versions, and never by another family', () => {
+      const dir = join(newRoot(), 'transcripts');
+      const at = (name, day, id) => {
+        const path = join(dir, 's1', 'subagents', name);
+        write(path, `${agentLine(id)}\n`);
+        utimesSync(path, new Date(2026, 0, day), new Date(2026, 0, day));
+      };
+      at('old.jsonl', 1, 'claude-opus-4-6');
+      at('new.jsonl', 2, 'claude-opus-4-7');
+      at('newest.jsonl', 3, 'claude-sonnet-4-5');
+      const found = latestAgentModels(dir, ['opus', 'sonnet', 'haiku']);
+      assert.equal(found.get('opus'), 'claude-opus-4-7');
+      assert.equal(found.get('sonnet'), 'claude-sonnet-4-5');
+      assert.equal(found.has('haiku'), false);
+    });
+
+    it('compares a tier 3 batch through the Tier 3 row', () => {
+      const fixture = setup((row) => [row({ tier: '3', effort: 'xhigh' })]);
+      const dir = join(fixture.root, 'transcripts');
+      write(join(dir, AGENT), `${agentLine('model-x-2')}\n`);
+      const out = renderView(
+        buildView({ root: fixture.root, agentsDir: fixture.agents, transcriptsFor: () => dir }),
+      );
+      assert.match(out, /alpha code-reviewer: current, scored 1 of 1/);
+      assert.match(out, /model version moved since the batch of \S+: model-x-1 to model-x-2/);
+    });
+
+    it('prints nothing about the version for a reviewer that is not current', () => {
+      const { root, agents } = setup(() => []);
+      const out = renderView(buildView({ root, agentsDir: agents, transcriptsFor: () => root }));
+      assert.doesNotMatch(out, /model version/);
+    });
+  });
 
   it('flags both covered reviewers when the project has no drill ledger', () => {
     const root = newRoot();

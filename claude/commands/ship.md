@@ -272,19 +272,27 @@ per project, in each affected project's actions file, against its risk class: ne
 table. A change to the class table itself is a blueprint change the owner approves.
 
 Drills measure what reviews miss (commands, cases, limits: the blueprint's `docs/claude-setup.md`).
-- One batch per setup review, per project: 4-6 cases at the profile's models and efforts; others
-  only for a named comparison.
+- A batch runs only when the setup changed, since a rerun on an unchanged setup mostly measures
+  chance: a reviewer's text (its file or the profile's domain checklist), model or effort changed,
+  or the view prints `model version moved since the batch of <date>`. It uses all the reviewer's active cases at the profile's models and efforts;
+  other settings only for a named comparison. No calendar batches. Run a comparison twice only when
+  a decision rests on a small gap.
+- A bug that got past review becomes a new case at the setup review, when a good one can be made from
+  it. The view then reads `batch incomplete` until the reviewer's next batch covers it.
 - `builder-heavy` writes the cases. The main session never opens them and reads only counts. Never
   tune a reviewer's text to a case; a case seen while editing an agent is retired.
 - A batch is one owner command in the actions file, because a session's sandbox refuses the network
   it needs. If `drill.mjs probe` ever exits 0 from a session, that session may run the same command;
   nothing else changes.
-- Done only when the view prints `current, scored N of N` for the reviewer: a batch for its own
-  text and the domain checklist at the profile's model and effort, covering its active cases. A
-  later comparison cannot reopen it. Until then the item stays in the actions file and reports keep
-  the view's `no batch for current text` or `batch incomplete` under Open issues. A command written
-  is not a batch run. `context changed since the batch of <date>` (the rest of the profile or the
-  rules moved) is information only: no item, no Open issue.
+- Done only when the view prints `current, scored N of N` for the reviewer and no `model version
+  moved` line: a batch for its own text and the domain checklist at the profile's model and effort,
+  covering its active cases. A later comparison cannot reopen it. Until then the item stays in the
+  actions file and reports keep the view's line under Open issues. A command written is not a batch
+  run. `model version not checked` (no agent run on that model to compare) is information only.
+- `context changed since the batch of <date>` (the rest of the profile or the rules moved) is
+  information only: no item, no Open issue, unless the setup review judges that the edit changes
+  what reviewers look for. Then it raises a batch item, with the reason, done when a full batch at
+  the new context clears that line (the view already reads `current` before it runs).
 
 ## 8. The challenger (direction, not code)
 

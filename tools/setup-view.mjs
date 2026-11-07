@@ -25,11 +25,16 @@
 //   later batch at another model, effort or text, or of fewer cases, is ignored: a named comparison
 //   cannot reopen anything. A change elsewhere in the profile or rules prints one information line and
 //   reopens nothing.
+// - A profile alias (`opus`) can move to a new version with no edit anywhere, and it still matches the
+//   batch. So the view compares the batch's concrete id with the newest id this project's agents ran
+//   on, from their transcripts, and prints a line when they differ. Agents only: a main session may be
+//   on a version chosen by hand. No run to compare says so, and is never read as unchanged.
 // - A batch can be resumed, so it can hold a blank and a later score for one case. The latest row per
 //   case in a batch is the one that counts; the rows it replaces are only counted as superseded.
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { transcriptsDir } from './spend-view.mjs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -418,6 +423,72 @@ export function modelMatches(id, requested) {
   return id === requested || id.startsWith(`${requested}-`);
 }
 
+// Newest first and capped: the answer is nearly always in the first few files.
+const MAX_AGENT_TRANSCRIPTS = 200;
+
+function agentTranscripts(dir) {
+  const files = [];
+  let sessions = [];
+  try {
+    sessions = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    // No transcripts for this project: nothing to compare with.
+    return [];
+  }
+  for (const session of sessions) {
+    const folder = join(dir, session, 'subagents');
+    try {
+      for (const name of readdirSync(folder)) {
+        if (!name.endsWith('.jsonl')) continue;
+        const path = join(folder, name);
+        files.push({ path, at: statSync(path).mtimeMs });
+      }
+    } catch {
+      // A session with no agents, or a file gone since the listing.
+    }
+  }
+  return files
+    .sort((a, b) => b.at - a.at)
+    .slice(0, MAX_AGENT_TRANSCRIPTS)
+    .map((f) => f.path);
+}
+
+function modelOfLine(line) {
+  if (!line.includes('"model"')) return null;
+  try {
+    const row = JSON.parse(line);
+    const id = row?.type === 'assistant' ? row.message?.model : null;
+    // Also drops `<synthetic>`, and keeps anything odd from ever being printed.
+    return typeof id === 'string' && /^[a-z0-9.-]+$/.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+// For each requested model (an alias or an id), the concrete id of its newest agent message.
+export function latestAgentModels(dir, requested) {
+  const found = new Map();
+  for (const path of agentTranscripts(dir)) {
+    if (requested.every((r) => found.has(r))) break;
+    let lines = [];
+    try {
+      lines = readFileSync(path, 'utf8').split('\n');
+    } catch {
+      continue;
+    }
+    for (let i = lines.length - 1; i >= 0 && requested.some((r) => !found.has(r)); i -= 1) {
+      const id = modelOfLine(lines[i]);
+      if (id === null) continue;
+      for (const r of requested) {
+        if (!found.has(r) && modelMatches(id, r)) found.set(r, id);
+      }
+    }
+  }
+  return found;
+}
+
 // One row per case in each batch: the latest, in the order those rows were written. The ledger is
 // append-only, so a resumed batch keeps its blank and adds the later score. A row with no batch or case
 // names nothing to replace, and stays.
@@ -465,6 +536,9 @@ export function reviewerStatus({ rows, reviewer, agentHash, profile, cases, unre
     current: true,
     scored: planned,
     planned,
+    batchModel: last.model,
+    batchDate: last.date,
+    requestedModel: profileModel(profile, reviewer, Number(last.tier)).model,
     ...(contextDiffers ? { contextChangedSince: last.date } : {}),
   };
 }
@@ -491,7 +565,7 @@ export function findProjects(root) {
 
 const emptyTotals = () => ({ rows: 0, noModel: 0, malformed: 0, grouped: 0, noLedger: 0 });
 
-export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR }) {
+export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR, transcriptsFor = transcriptsDir }) {
   const view = {
     projects: [],
     classes: { A: 0, B: 0, C: 0, [UNKNOWN]: 0 },
@@ -568,6 +642,13 @@ export function buildView({ root, agentsDir = DEFAULT_AGENTS_DIR }) {
         context,
       }),
     }));
+    const requested = [...new Set(project.texts.filter((t) => t.current).map((t) => t.requestedModel))];
+    if (requested.length > 0) {
+      const seen = latestAgentModels(transcriptsFor(dir), requested);
+      for (const t of project.texts.filter((text) => text.current)) {
+        t.agentModel = seen.get(t.requestedModel) ?? null;
+      }
+    }
     view.projects.push(project);
   }
   return view;
@@ -672,6 +753,14 @@ export function renderView(view) {
       // Information only. A date, since no batch name is printed.
       if (t.contextChangedSince !== undefined) {
         lines.push(`  ${label}: context changed since the batch of ${t.contextChangedSince}`);
+      }
+      if (t.current && t.agentModel === null) {
+        lines.push(`  ${label}: model version not checked, no agent run on this model to compare`);
+      } else if (t.current && t.agentModel !== t.batchModel) {
+        lines.push(
+          `  ${label}: model version moved since the batch of ${t.batchDate}: ` +
+            `${t.batchModel} to ${t.agentModel}`,
+        );
       }
     }
   });
