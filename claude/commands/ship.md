@@ -27,7 +27,8 @@ touch). The highest tier among them wins. Log the tier with the file or trigger 
 
 Tier 3 triggers (only these, never mere doubt):
 - a. An irreversible action on real data: a rewrite or drop in a migration, a backfill, a bulk
-  delete, a restore.
+  delete, a restore. Exception: in a class B project, a one-off meeting every condition of the
+  recoverable route (end of section 2) is Tier 2 with that route's steps; section 4 still applies.
 - b. The safety net's own code: data checks, health grading, gates, CI, fault injection, alert
   delivery, this loop's review steps, a reviewer agent's text (section 2, step 7).
 - c. An integrity format: hashed or append-only records, canonical serialization, the backup
@@ -67,6 +68,52 @@ The strongest automated layer, before anything reaches the owner.
    batch goes to the owner with the numbers, quoting the n `drill.mjs compare` printed. The view's
    text hash sees only the reviewer's own file and that checklist, so reports keep a loop edit's
    batch under Open issues until it exists.
+
+**Recoverable route (class B only).** For a one-time change to stored data that meets all of these.
+A condition in doubt counts as false, and then the task stays Tier 3.
+- No other Tier 3 trigger applies, and it is not a backfill.
+- It writes only the columns the plan names and adds rows only to a table of its own. A collected
+  value (a price, a title) never changes.
+- It touches no auth, access or account data, no row scoped to one user, and no integrity format.
+- Its undo is its own command, not a restore of the backup. The rehearsal runs the change, a
+  person's edit on a changed row, one full scheduled cycle, the undo and one more cycle, and compares
+  the whole database with a copy given the same edit and the same cycles without the run. The log
+  names every table or settings key that differs, with why it is harmless.
+- Neither the run, its undo nor the scheduled jobs after them send anything outside the app because
+  of it, shown by that same comparison. A send that cannot be held back, or the memory of one that
+  the undo does not restore, means this route does not apply.
+- A backup is taken before the real run, under a name no later command can overwrite.
+
+Steps, at the profile's Tier 2 efforts, with the log naming how each condition was met. Each prompt
+names this route and its mode.
+1. Plan and plan review as in step 1 of the list above. The plan also says, for each step, what
+   happens if it is run twice or killed there, and it names these guards and no others: a dry run by
+   default, a refusal while another job writes the same data, a refusal with no fresh backup, the
+   undo, and a stated row count that must match. Another guard needs a named failure seen in the
+   rehearsal or the reviews. The plan review's prompt lists the conditions and asks the reviewer to
+   break each.
+2. Build and rehearse as in steps 2 and 3 of the list above, on synthetic data or the one copy the
+   project's rules allow, never on a backup. Rows Claude may not read are rehearsed by an owner
+   command printing only counts and checksums. A fault script is part of the rehearsal: it kills the
+   command at every write step and reruns it both at once and after one scheduled cycle, kills the
+   undo and reruns it, runs the command twice in a row and twice at once, shows a refusal when the
+   backup fails, and restores that run's own backup of the copy onto another copy.
+3. `code-reviewer`, normal, reading real data only through that same copy. Then the usual triage and
+   fixes.
+4. After those fixes, one `code-reviewer` pass with `Mode: adversarial`, its prompt limited to kill,
+   rerun, two runs at once, undo, backup, a guard failing open, and any way the real command can
+   differ from what was rehearsed; at most 5 findings. Its logic fixes get one fix round of their
+   own, outside section 5 step 7's count, re-reviewed by a normal pass, not another adversarial one.
+   Still open: trigger e.
+5. After the last fix, the fault script and the full rehearsal run again on the final commit, and
+   the owner's step names that commit. The real run and any undo stay owner steps.
+
+On this route commits carry `Ship-Tier: 2`, and the task's last commit adds
+`Ship-Reviews: code-reviewer`. A condition found false before the real run, by a finding a test does
+not disprove, restarts the task at step 1 of this section's first list (Tier 3's own steps, not this
+route's), at Tier 3 efforts; earlier reviews do not count, and its last commit carries `Ship-Tier: 3`
+and `Ship-Reviews: code-reviewer, triage`. Found false after the real run: an owner item with the
+undo.
 
 ## 3. Models and efforts
 
@@ -134,7 +181,25 @@ Then:
 7. Triage: the main session checks a single reviewer's findings against the code itself;
    `triage` with two or more. Fix what is right, take the recommended option on cosmetic asks,
    skip what is wrong; owner choices to the actions file. Fixes in one batch. Re-review only
-   Tier 2 and 3 logic fixes, by the reviewer that found them. At most 2 fix rounds.
+   Tier 2 and 3 logic fixes, by the reviewer that found them. At most 2 fix rounds. In class B only:
+   - No real impact: a finding the main session checked against the data, with no affected row and
+     no job or person likely to produce one, goes to the project's to-do list with the query, the
+     copy's date and what would make it non-zero; no fix or re-review. It counts as accepted,
+     `severe` 0, and the log lists it. Rows the checked copy cannot hold (a `noAi` source, blanked
+     text, anything newer than the copy) count as unknown, not as none. Never for auth, access or
+     leaks between accounts; backups, restore or undo; gates, alert delivery, self-update or
+     migrations; a failure that has not happened yet (a kill, a rerun, a refused fetch); a domain
+     checklist item or the profile's named worst failure.
+   - Fixes breeding findings: when a round after the first has at least 3 findings and most are
+     `fix_caused`, those get no fix list; any others take the usual route. The main session decides,
+     without asking the owner, whether that design should exist. If so, the findings take the usual
+     route. If not, it simplifies or removes the design. That is the round's fix, re-reviewed as a
+     logic fix, and it keeps a passing test for the finding the design answered; if it cannot, the
+     design stays and the findings take the usual route. In Tier 3 it is the different approach of
+     section 2 step 6. Findings left unfixed go to the to-do list and the log. A finding that would
+     cost days of wrong values, lasting harm or the profile's named worst failure, or that touches
+     auth, access, leaks, backup, restore or undo, is fixed as usual, and no such code or its fault
+     test is removed this way. Step 3's limits on dropping apply.
 8. Commit files by name (never `git add -A`); the owner pushes. Each commit of a Tier 1-3 task ends
    with `Ship-Task: <slug>` (public once pushed: no private names) and `Ship-Tier: <n>`, in one
    paragraph with the attribution. Each task's last commit before a planned push adds `Ship-Reviews:`
@@ -190,8 +255,10 @@ process runs since the last review
   trust-territory paths.
 - Owner stops rising over 3 reviews: propose standing rules for the repeated kinds.
 - Builder retries in more than 1 in 3 tasks: propose a stronger builder or smaller chunks.
-- A spend pool over 10% of the total, or most of a review round's findings `fix_caused`: propose
-  how to shrink it, without cutting a review the drills have not measured.
+- A spend pool over 10% of the total: propose how to shrink it, without cutting a review the
+  drills have not measured.
+- From the logs, report tasks on the recoverable route, findings parked as no real impact and rounds
+  redesigned for `fix_caused`. Any `escape_of` pointing at one of them: propose removing that rule.
 - `--audit` shows an open task: run its missing review. Its `unclaimed` commits have no task to
   close, and closing one would need a history rewrite: look at each `unreviewed` one, then add its
   sha to that file; only `unreviewed` above 0 is open. Log the count of red process runs; none at all

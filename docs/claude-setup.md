@@ -161,8 +161,9 @@ Agent-tool reviewer shares the session's folder, so it would see today's code wi
 fixed. That process needs the model API, and a session's sandbox has so far refused it (a denied
 connection, then a timeout). So a batch is one command the owner runs in their own terminal,
 unattended: the session runs `validate`, then writes the `run` command into the actions file with
-`Not rehearsed: the sandbox refuses the model API` and its cost (rough, not measured: 0.4-0.7M fresh
-tokens for 6 cases; each case's raw `answer.json` holds what the run used). The sandbox is not
+`Not rehearsed: the sandbox refuses the model API` and its cost (first batches, 2026-11-07, 6 cases at
+list price: about $4 with `code-reviewer` at medium, about $8 at high plus any resumes; each case's raw
+`answer.json` holds what the run used). The sandbox is not
 loosened for this.
 
 `run` starts with the boundary check, the same one `probe` runs, and prints
