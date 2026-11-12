@@ -739,8 +739,23 @@ function commit(clone, message) {
   return gitOut(clone, ['rev-parse', 'HEAD']);
 }
 
-export function buildPrompt({ range, specPath, checks }) {
-  return `Review this change.\nCommit range: ${range}\nSpec: ${specPath}\nCHECKS output: ${checks}\n`;
+// What code reviewers get in a normal review. Both `/ship` section 5, step 6's code-reviewer sentence
+// and this prompt are built from it, and a test fails while that sentence differs. So a change to what
+// reviewers get is made here, once, and then reruns the drills (`/ship` section 2, step 7).
+export const REVIEWER_INPUTS = [
+  { ship: 'the commit range (or the working tree)', label: 'Commit range', key: 'range' },
+  { ship: 'the spec path', label: 'Spec', key: 'specPath' },
+  { ship: 'the CHECKS output', label: 'CHECKS output', key: 'checks' },
+];
+
+export function reviewerInputsSentence() {
+  const named = REVIEWER_INPUTS.map((input) => input.ship);
+  return `Code reviewers get ${named.slice(0, -1).join(', ')} and ${named.at(-1)}.`;
+}
+
+export function buildPrompt(values) {
+  const lines = REVIEWER_INPUTS.map((input) => `${input.label}: ${values[input.key]}\n`);
+  return `Review this change.\n${lines.join('')}`;
 }
 
 // Builds the reviewer's clone: base, today's profile and rules overlaid as a commit, the change as one

@@ -30,7 +30,7 @@ Tier 3 triggers (only these, never mere doubt):
   delete, a restore. Exception: in a class B project, a one-off meeting every condition of the
   recoverable route (end of section 2) is Tier 2 with that route's steps; section 4 still applies.
 - b. The safety net's own code: data checks, health grading, gates, CI, fault injection, alert
-  delivery, this loop's review steps, a reviewer agent's text (section 2, step 7).
+  delivery, any edit to this file or to a shared agent's text (section 2, step 7).
 - c. An integrity format: hashed or append-only records, canonical serialization, the backup
   format, signatures; authentication or cryptography design (not a routine access check).
 - d. A change across repos or the server at once: deploy and self-update, systemd units,
@@ -42,6 +42,15 @@ Moves:
 - A Tier 0 or 1 change that fails CHECKS twice moves up one tier.
 - A Tier 2 bug still open after 2 fix rounds moves to Tier 3 (trigger e), not to the owner.
 - A Tier 3 change still open after its second approach goes to the owner, with the evidence.
+
+The shared setup (the blueprint, `B=$(readlink -f ~/.claude/commands)/../..`): an edit to this file
+or a shared agent's text is trigger b, and so is a tools edit that changes how drills are scored,
+a hash, or what the setup view calls current (section 2, step 4 is shown by the tools' existing
+planted-miss tests). Any other edit to its tools alone is Tier 2, reviewed by `code-reviewer` at the
+project's row. CHECKS for any blueprint edit: `node --test` on
+`$B/tools/*.test.mjs`, with `SHIP_MD=<draft>` while this file is a draft, and again once it lands.
+Owner items about the shared setup go only to `$B/private/global-actions.md`, never to a project's
+actions file.
 
 ## 2. Tier 3 handling
 
@@ -61,13 +70,37 @@ The strongest automated layer, before anything reaches the owner.
    `triage` merges.
 6. Fixes: at most 2 rounds. Still open: one different approach or a smaller scope (a new plan,
    the same steps). Still open: to the owner.
-7. Setup edits (the loop's review steps, a reviewer's text, the profile's domain checklist):
-   `claude/` is live on save, so draft in the run folder. Before it lands or counts as done, rerun
-   the drills for the affected reviewers (section 7), a text edit with
-   `--agents-dir <draft folder> --reviewer <name>`. A lower caught count than the last complete
-   batch goes to the owner with the numbers, quoting the n `drill.mjs compare` printed. The view's
-   text hash sees only the reviewer's own file and that checklist, so reports keep a loop edit's
-   batch under Open issues until it exists.
+7. Setup edits (this file, a shared agent's text, the profile's domain checklist, the tools at
+   trigger b):
+   `claude/` is live on save, so draft in the run folder. Read `$B/private/global-actions.md`
+   first (section 1). Before the edit lands or counts as done, by what it changes; the Tier 3
+   reviews check which kind it is:
+   - A reviewer's text or the checklist: rerun the drills for the affected reviewers (section 7),
+     a text edit with `--agents-dir <draft folder> --reviewer <name>`. A lower caught count than
+     the last complete batch goes to the owner with the numbers, quoting the n `drill.mjs compare`
+     printed. A typo is never fixed alone: one in a shared agent's text goes to the global actions
+     file's "Waiting for the next edit", one in a checklist to that project's to-do list, each with
+     the file and line; the next real edit of that text takes it.
+   - What code reviewers get in a normal review (section 5, step 6's code-reviewer sentence): the
+     change goes into `REVIEWER_INPUTS` in `$B/tools/drill.mjs`, which builds both that sentence and
+     the drill prompt; a test fails while the two differ. Then the drills for every project, each
+     project's batch an item in the global actions file, since the view's hash cannot see this edit
+     and still prints `current`. An item is done only when that project's drill ledger holds a
+     complete batch for the reviewer dated on or after the edit's commit; until then reports keep
+     it under Open issues by name.
+   - Any other edit, other prompts included (modes, UX and trust inputs, finding limits): no drills,
+     since reviewers never read this file and a batch cannot see it. One that could let more
+     through (fewer or lighter reviews, a lower finding limit, a narrower tier or trigger, findings
+     parked or dropped) gets a back-check: a fresh `code-reviewer` at the Tier 3 row applies the new
+     rule to every project's past task logs, saved reports and ledger rows, and counts which findings
+     or reviews it would have changed and how serious they were (`severe`, accepted). It says how
+     many tasks it read in full; a task without saved reports is unknown, never none. Its prompt
+     asks for a count table, not findings, so the 12-finding limit does not apply. One agent-ledger
+     row, reviewer `back-check`: `findings` the ones it would have changed, `accepted` those of them
+     once accepted, `rejected` the rest, `duplicate` 0, `severe` those once rated severe,
+     `fix_caused` 0. The counts go to the
+     global actions file, section C, and the edit lands only once the owner agrees. The edit also
+     adds its rule to section 7's list and says what a task's `log.md` records each time it is used.
 
 **Recoverable route (class B only).** For a one-time change to stored data that meets all of these.
 A condition in doubt counts as false, and then the task stays Tier 3.
@@ -249,7 +282,7 @@ process runs since the last review
 (`gh run list --workflow Process --limit 100`). Triggers:
 - A reviewer over 70% rejected in its last 4 runs (noisy), or with no accepted finding of its
   own in its last 3 (redundant): propose going lighter or dropping it. Not for the challenger
-  (section 8).
+  (section 8), nor `back-check` (section 2, step 7), where finding nothing is the good outcome.
 - Any escape in trust territory: propose going heavier there (model, effort, or a checklist item).
 - More than 1 in 5 tasks with `final_tier` above `tier`: propose clearer tier examples or
   trust-territory paths.
@@ -257,25 +290,31 @@ process runs since the last review
 - Builder retries in more than 1 in 3 tasks: propose a stronger builder or smaller chunks.
 - A spend pool over 10% of the total: propose how to shrink it, without cutting a review the
   drills have not measured.
-- From the logs, report tasks on the recoverable route, findings parked as no real impact and rounds
-  redesigned for `fix_caused`. Any `escape_of` pointing at one of them: propose removing that rule.
+- From the logs, report how each loop rule that could let more through was used. Each such rule
+  joins this list with its edit (section 2, step 7): tasks on the recoverable route, findings parked
+  as no real impact, rounds redesigned for `fix_caused`. Any `escape_of` pointing at one of them:
+  propose removing that rule.
 - `--audit` shows an open task: run its missing review. Its `unclaimed` commits have no task to
   close, and closing one would need a history rewrite: look at each `unreviewed` one, then add its
   sha to that file; only `unreviewed` above 0 is open. Log the count of red process runs; none at all
   despite pushes: the check may have gone quiet, so look at the workflow.
 
-Each proposal goes into the actions file (section C) with its numbers. The setup changes only
+Each proposal goes into an actions file (section C) with its numbers: one about a project's own
+setup (its profile, models, paths) into that project's file; one about the shared setup (this loop,
+the agents, the tools, the class table) into `$B/private/global-actions.md` (section 1), and never
+into a project's file. Read that file at the start of each setup review. The setup changes only
 when the owner agrees; the profile's "Setup changes" records the date and the reason. A lesson
-that holds for every project goes to the blueprint. A proposal may rest on evidence from other
-projects (acceptance only hints; drill scores are the basis for comparing models), but is written
-per project, in each affected project's actions file, against its risk class: never below its class
-table. A change to the class table itself is a blueprint change the owner approves.
+that holds for every project goes to the blueprint. A proposal about a project's own setup may
+rest on evidence from other projects (acceptance only hints; drill scores are the basis for
+comparing models), but is written per project, in each affected project's actions file, against its
+risk class: never below its class table. A change to the class table itself is a blueprint change the owner approves.
 
 Drills measure what reviews miss (commands, cases, limits: the blueprint's `docs/claude-setup.md`).
 - A batch runs only when the setup changed, since a rerun on an unchanged setup mostly measures
   chance: a reviewer's text (its file or the profile's domain checklist), model or effort changed,
-  or the view prints `model version moved since the batch of <date>`. It uses all the reviewer's active cases at the profile's models and efforts;
-  other settings only for a named comparison. No calendar batches. Run a comparison twice only when
+  or what code reviewers get changed (section 2, step 7), or the view prints `model version moved
+  since the batch of <date>`. It uses all the reviewer's active cases at the profile's models and
+  efforts; other settings only for a named comparison. No calendar batches. Run a comparison twice only when
   a decision rests on a small gap.
 - A bug that got past review becomes a new case at the setup review, when a good one can be made from
   it. The view then reads `batch incomplete` until the reviewer's next batch covers it.

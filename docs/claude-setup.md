@@ -56,8 +56,9 @@ session loads it only when it does agent work. It holds:
 
 ## The owner's files (private ops)
 
-The owner's single place for anything to do or decide is `actions.md`; Claude reads it at the
-start of every session and updates it after every piece of work.
+The owner's single place for anything to do or decide about a project is its `actions.md`; Claude
+reads it at the start of every session and updates it after every piece of work. The shared setup
+has its own file (below).
 
 - `actions.md`: only what waits on the owner. A. steps to run (commands, where), B. checks in the
   app, C. decisions needed, D. comments to know, F. work log since their last review. Each item
@@ -73,6 +74,13 @@ start of every session and updates it after every piece of work.
 - `drills/<id>/`: the drill cases and their keys, never public.
 - `process-reviewed.txt`: one sha per line, commits the process audit lists that a session has looked
   at. A session adds a sha only after looking at that commit.
+
+The shared setup (the loop, the agents, the tools, the class table) has its own pair, never mixed
+into a project's: `global-actions.md` and `global-actions-done.md` in the blueprint's own
+`private/` folder (not a project's `private/`), found as
+`$(readlink -f ~/.claude/commands)/../../private/`. That folder is a separate private repo (from step A1 of that file) that the
+public blueprint's `.gitignore` excludes, so a fresh clone needs it cloned by hand. Sessions read it
+for setup work: `/ship` section 2, step 7 and each setup review.
 
 Rows written before the `model`, `builder_model`, `severe` and `fix_caused` columns stay as they
 are, at their old width: never guessed or backfilled. A reader goes by the header row.
@@ -99,8 +107,15 @@ which changes what a reviewer looks for:
   nothing about quality; only drills do that. Task rows start with tasks begun after 2026-11-07,
   when agent descriptions began carrying the slug.
 
-An edit to the loop's review steps or to a reviewer's text is Tier 3 trigger b, and must rerun the
-drills for the affected reviewers before it counts as done (`/ship` section 2).
+Any edit to the loop or to a shared agent's text is Tier 3 trigger b, and so is a tools edit that
+changes how drills are scored, a hash, or what the view calls current; any other tools edit alone is
+Tier 2. Every blueprint edit runs `node --test` on `tools/*.test.mjs`, with `SHIP_MD=<draft>` while
+the loop is a draft, and again once it lands (`/ship` section 1). A reviewer's text, or a loop edit
+that changes what code reviewers get, reruns the drills for the affected reviewers before it counts
+as done. Reviewers never read the loop, so other loop edits get no drills; one that
+could let more through gets a back-check on past tasks instead (`/ship` section 2, step 7). The
+loop's sentence on what code reviewers get and the drill prompt are both built from
+`REVIEWER_INPUTS` in `tools/drill.mjs`, and a test fails while the loop's sentence differs.
 
 ### Drills
 
@@ -275,9 +290,10 @@ record. It prints no slugs, case ids, hashes or file contents.
   may be chosen by hand. With no such run it prints `model version not checked, no agent run on this
   model to compare`: information only, and never read as unchanged.
 - A batch that did not run stays visible this way, and reports keep the line under Open issues until
-  the batch exists; a command written is not a batch run. A loop edit changes no hash, so the view
-  cannot see it: reports carry that batch by name instead. For a draft text, pass the same
-  `--agents-dir` as the batch.
+  the batch exists; a command written is not a batch run. A loop edit that changes what reviewers
+  receive changes no hash, so the view cannot see it: each project's batch is an item in the global
+  actions file, done only when that project's drill ledger holds a complete batch dated on or after
+  the edit's commit. For a draft text, pass the same `--agents-dir` as the batch.
 
 ## The report
 

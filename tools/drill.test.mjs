@@ -25,6 +25,8 @@ import {
   appendRow,
   batchSummary,
   buildPrompt,
+  REVIEWER_INPUTS,
+  reviewerInputsSentence,
   caseProblems,
   checkBoundary,
   holdToBatchModel,
@@ -1482,6 +1484,48 @@ test('neutralProblems: the programme is named nowhere the reviewer can see', () 
   assert.ok(!/drill/i.test(buildPrompt({ range: 'a..b', specPath: 's', checks: 'c: pass' })));
 });
 
+// A draft of /ship is tested before it lands: `SHIP_MD=<draft> node --test`.
+const SHIP_MD = process.env.SHIP_MD ?? fileURLToPath(new URL('../claude/commands/ship.md', import.meta.url));
+
+test('/ship section 5, step 6 names exactly what the drill prompt gives code reviewers', () => {
+  const text = readFileSync(SHIP_MD, 'utf8').replace(/\s+/g, ' ');
+  const step = / 6\. Review: the tier's reviewers in one message \(parallel\)\. (.*?) 7\. Triage: /.exec(text);
+  assert.ok(step, `step 6's opening or step 7's moved in ${SHIP_MD}: find the step again here`);
+  const aboutCode = step[1].split(/(?<=\.) /).filter((sentence) => /code reviewers/i.test(sentence));
+  assert.deepEqual(
+    aboutCode,
+    [reviewerInputsSentence()],
+    'what code reviewers get changed: make the change in REVIEWER_INPUTS, then rerun the drills',
+  );
+});
+
+test('a change to REVIEWER_INPUTS is a deliberate second edit', () => {
+  assert.deepEqual(
+    REVIEWER_INPUTS,
+    [
+      { ship: 'the commit range (or the working tree)', label: 'Commit range', key: 'range' },
+      { ship: 'the spec path', label: 'Spec', key: 'specPath' },
+      { ship: 'the CHECKS output', label: 'CHECKS output', key: 'checks' },
+    ],
+    'a change here changes what the drills give reviewers: rerun them (/ship section 2, step 7)',
+  );
+});
+
+test('the drill prompt is built only from REVIEWER_INPUTS', () => {
+  const values = { range: 'r1..r2', specPath: 'docs/spec.md', checks: 'all: pass' };
+  const lines = buildPrompt(values).trimEnd().split('\n');
+  assert.equal(lines[0], 'Review this change.');
+  assert.deepEqual(
+    lines.slice(1),
+    REVIEWER_INPUTS.map((input) => `${input.label}: ${values[input.key]}`),
+  );
+  assert.deepEqual(
+    REVIEWER_INPUTS.map((input) => input.key),
+    ['range', 'specPath', 'checks'],
+    'a new input needs its value passed by promptFor in drill.mjs',
+  );
+});
+
 // --- validate ---
 
 test('validate: a good replay and a good planted case pass, with no reviewer involved', () => {
@@ -2264,13 +2308,23 @@ test('run: the row is one the global view reads, and it matches the current text
   fake.queue(canned(inWindow()));
   git(fx.repo, 'checkout', '--quiet', 'main');
   assert.equal(runCli(fx, fake, 'one').status, 0);
-  const view = buildView({ root, agentsDir: fx.agentsDir });
+  const view = buildView({ root, agentsDir: fx.agentsDir, transcriptsFor: () => join(root, 'none') });
   assert.equal(view.projects.length, 1);
   assert.equal(view.totals.drill.rows, 1);
   assert.equal(view.totals.drill.malformed, 0);
   assert.equal(view.totals.drill.grouped, 1);
   const text = view.projects[0].texts.find((t) => t.reviewer === 'code-reviewer');
-  assert.deepEqual(text, { reviewer: 'code-reviewer', current: true, scored: 1, planned: 1 });
+  assert.match(text.batchDate, /^\d{4}-\d{2}-\d{2}$/);
+  assert.deepEqual(text, {
+    reviewer: 'code-reviewer',
+    current: true,
+    scored: 1,
+    planned: 1,
+    batchModel: 'claude-opus-9-9',
+    batchDate: text.batchDate,
+    requestedModel: 'opus',
+    agentModel: null,
+  });
 });
 
 // --- Resuming a batch ---
@@ -2594,12 +2648,17 @@ test('run: a resumed batch reads as current in the global view, the blank counte
   assert.equal(half.projects[0].texts.find((t) => t.reviewer === 'code-reviewer').current, false);
   fake.queue(canned(inWindow()), canned(inWindow()));
   assert.equal(resumeCli(fx, fake, 'one').status, 0);
-  const view = buildView({ root, agentsDir: fx.agentsDir });
-  assert.deepEqual(view.projects[0].texts.find((t) => t.reviewer === 'code-reviewer'), {
+  const view = buildView({ root, agentsDir: fx.agentsDir, transcriptsFor: () => join(root, 'none') });
+  const text = view.projects[0].texts.find((t) => t.reviewer === 'code-reviewer');
+  assert.deepEqual(text, {
     reviewer: 'code-reviewer',
     current: true,
     scored: 2,
     planned: 2,
+    batchModel: 'claude-opus-9-9',
+    batchDate: text.batchDate,
+    requestedModel: 'opus',
+    agentModel: null,
   });
   assert.equal(view.totals.drill.rows, 2);
   assert.equal(view.supersededDrillRows, 1);
