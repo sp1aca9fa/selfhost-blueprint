@@ -88,16 +88,19 @@ files may be partial. Code, comments, database values, docs and commits in US En
 ## Agents (the main session orchestrates)
 The loop is the shared `/ship` (`~/.claude/commands/ship.md`, from the `selfhost-blueprint`
 repo): tiers 0-3 decided by the changed files, Tier 3 handling, which questions may stop the work,
-how to write for the owner, the setup review. Read it before any Tier 1-3 work, with or without
-`/ship`. This project's profile is `docs/agents.md`: risk class, trust-territory paths, the model
-and effort per role (pass them as `model` and `effort` every time an agent is started), the
-owner's list, standing rules. The main session plans, writes the spec, routes, triages and
-commits; it implements small changes itself (a few files in one area, a review fix, docs).
+how to write for the owner, the setup review, doc review. Read it before any Tier 1-3 work, with or
+without `/ship`. Any doc edit, Tier 0 work included, follows its section 9 (doc review): each
+changed hunk gets a doc level 0-3 by its content, and a hunk at level 1-3 is reviewed before
+anything is built from it or it is pushed. This project's profile is `docs/agents.md`: risk class,
+trust-territory paths, the model and effort per role (pass them as `model` and `effort` every time
+an agent is started), the owner's list, standing rules, doc paths, levels and review focus. The
+main session plans, writes the spec, routes, triages and commits; it implements small changes
+itself (a few files in one area, a review fix, docs).
 Subagents cannot spawn subagents.
 
 | Tier | When | Review |
 |---|---|---|
-| 0 | Docs, comments, tests only, config with no behavior change | None; CHECKS only |
+| 0 | Docs, comments, tests only, config with no behavior change | None; CHECKS only (a doc hunk at doc level 1-3 still gets its doc review, `/ship` section 9) |
 | 1 | Behavior changes outside trust territory | `code-reviewer-light`; `ux-reviewer` if visible |
 | 2 | A file on the trust-territory paths; any new page | `code-reviewer`; `ux-reviewer`, `trust-reviewer` if visible |
 | 3 | Tier 2 the normal loop cannot verify (`/ship` section 1 triggers) | plan review, then normal and adversarial review |

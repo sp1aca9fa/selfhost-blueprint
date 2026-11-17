@@ -39,7 +39,27 @@ Item 1 of the Tier 2 review and the builder-heavy's extra rules:
 
 A closed list: anything not here (or in `/ship` section 4's fixed items) the orchestrator decides
 and reports. <What changes the meaning of a number, signal or alert; how money or risk is shown;
-which data is trusted.>
+which data is trusted. Where something settles an entry (a source, the reference tool, the owner's
+cases), name it in the entry: doc review then follows it (`/ship` section 9).>
+
+## Doc levels
+
+Doc review (`/ship` section 9) levels each changed doc hunk by its content; this section only
+raises a level.
+- Docs: <the paths that hold docs, for example `CLAUDE.md`, `README.md`, `docs/`, the glossary in
+  `packages/content/en.json`>. Excluded: <generated files, reviewed through their sources, for
+  example `REQUIREMENTS.md`; a license text>.
+- Floor: <1, 2 or 3>, the lowest level of any doc hunk not at level 0.
+- Paths that raise: <for example `docs/requirements/` at least 2>.
+- Reference tool: <the outside tool whose results this project matches, and where its docs are; or
+  none>.
+
+## Doc review focus
+
+What the doc reviewers check first here (the agents are generic; this is the project's part):
+- <for example: every date rule says which day's value it reads>
+- <for example: every amount names its currency, and the rounding where money is split>
+- <for example: what each rule does with a missing or unknown input>
 
 ## Standing rules
 
@@ -69,14 +89,22 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 | Tier 3: builder-heavy, code-reviewer | opus | xhigh | plan, build, normal and adversarial review |
 | ux-reviewer | sonnet | medium | visible changes |
 | trust-reviewer | - | - | <used or not, and why> |
-| triage | - | - | <used when two or more reviewers ran, or not> |
-| challenger | opus | high | direction only, on request or at a stage's start |
+| triage | - | - | <used when two or more reviewers ran, or not; doc review at level 2-3 always runs two or more> |
+| challenger | opus | high | direction only, on request, at a stage's start or for a new design in Tier 3 |
 | summarizer | haiku | low | |
+| doc-reviewer-consistency | opus | high | doc level 1-3 |
+| doc-reviewer-clarity | sonnet | high | doc level 2; a different model on purpose |
+| doc-reviewer-source | opus | high | doc level 3; web tools, as the on-trial derive has |
+| doc-reviewer-examples | opus | xhigh | doc level 3 |
+| doc-reviewer-adversarial | opus | xhigh | doc level 3 |
 
 ## Reviews used
 
 - Tier 0: none. Tier 1: code-reviewer-light (+ ux-reviewer if visible). Tier 2: code-reviewer
   (+ ux-reviewer, trust-reviewer if visible).
+- Doc review (`/ship` section 9), in any tier, Tier 0 included: doc level 1 consistency; level 2
+  consistency and clarity; level 3 consistency, source, examples and adversarial; triage
+  (`Mode: docs`) when two or more ran.
 - Tier 3: code-reviewer on the plan, then code-reviewer normal and adversarial, triage
   (+ ux-reviewer, trust-reviewer if visible).
 - Owner's actions file: code-reviewer-light with `Mode: actions`, once per task, when items with
@@ -88,7 +116,7 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 - Spec template: `docs/spec-template.md`.
 - Run logs: `.agent-runs/<date>-<slug>/` (git-ignored).
 - Ledgers: `private/ops/agent-ledger.csv` (one row per reviewer run) and
-  `private/ops/run-ledger.csv` (one row per task).
+  `private/ops/run-ledger.csv` (one row per task); reviewed docs in `private/ops/doc-reviews.csv`.
 - Owner's actions: `private/ops/actions.md` (done items in `actions-done.md`).
 
 ## Setup changes

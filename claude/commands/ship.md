@@ -6,9 +6,15 @@ argument-hint: <what to build or change>
 Task: $ARGUMENTS
 
 This file is the loop for every project built on the blueprint, used by `/ship` and read by the
-main session before any Tier 1-3 work done without `/ship`. The project's `docs/agents.md` (its
-profile) gives what differs: risk class, trust-territory paths, models and efforts, owner list,
-standing rules, CHECKS, paths. No profile: say so and stop.
+main session before any Tier 1-3 work done without `/ship`, and before any doc change at doc level
+1-3 (section 9). The project's `docs/agents.md` (its profile) gives what differs: risk class,
+trust-territory paths, models and efforts, owner list, standing rules, CHECKS, paths. No profile:
+say so and stop.
+
+Section 9 (doc review), and every rule here that names it or a doc level, applies only in a project
+that has adopted it: its `CLAUDE.md` points to section 9 ("after adoption" means from that commit).
+Elsewhere those rules are skipped and docs stay plain Tier 0. Adopted, but the profile has no "Doc
+levels": say so and stop.
 
 Do not message the owner until done, except for an owner stop (section 4). Finish with the
 report format from the project's `CLAUDE.md` and nothing else.
@@ -20,7 +26,7 @@ touch). The highest tier among them wins. Log the tier with the file or trigger 
 
 | Tier | What | Examples | Handling |
 |---|---|---|---|
-| 0 | Nothing a user, a job or the data can notice | docs, notes, comments, tests only, a rename with unchanged tests, config with no behavior change | no spec; CHECKS only; never reviewed "to be safe" (one exception: `Mode: actions`, section 6) |
+| 0 | Nothing a user, a job or the data can notice | docs, notes, comments, tests only, a rename with unchanged tests, config with no behavior change | no spec; CHECKS only; never reviewed "to be safe" (exceptions: `Mode: actions`, section 6; doc review, section 9) |
 | 1 | Behavior changes, none in trust territory | CLI output and glue, dev tooling, ops scripts that write no stored data, UI that shows no numbers, signals or money, new texts | spec; `builder`; CHECKS; `code-reviewer-light` (+ `ux-reviewer` if visible) |
 | 2 | Any file on the profile's trust-territory paths, or a new page | data collection and parsing, checks, calculations, money, alerts, auth and access, migrations, backups and restore, imports, deletes, server scripts that deploy or write data | spec; `builder-heavy`; CHECKS; `code-reviewer` (+ `ux-reviewer`, `trust-reviewer` if visible); logic fixes re-reviewed |
 | 3 | Tier 2 that the normal loop cannot verify (triggers below) | a backfill on real data, a new hash-chain format, the self-update path, a check's own code | section 2 |
@@ -55,7 +61,7 @@ actions file.
 ## 2. Tier 3 handling
 
 The strongest automated layer, before anything reaches the owner.
-1. Plan: `builder-heavy` (Tier 3 row) writes `.agent-runs/<date>-<slug>/plan.md`: the change,
+1. Plan (a new design first runs the challenger's blind step, section 8): `builder-heavy` (Tier 3 row) writes `.agent-runs/<date>-<slug>/plan.md`: the change,
    its expected gain and size limit (section 5 step 3), how it could fail silently, how it is
    undone, how it is rehearsed, the expected rehearsal output. `code-reviewer` reviews the plan (`Mode: plan`) before any code; one round of plan
    fixes.
@@ -75,6 +81,8 @@ The strongest automated layer, before anything reaches the owner.
    `claude/` is live on save, so draft in the run folder. Read `$B/private/global-actions.md`
    first (section 1). Before the edit lands or counts as done, by what it changes; the Tier 3
    reviews check which kind it is:
+   - A doc reviewer's text, while `drill.mjs` has no doc cases: the back-check of the third bullet
+     instead of drills.
    - A reviewer's text or the checklist: rerun the drills for the affected reviewers (section 7),
      a text edit with `--agents-dir <draft folder> --reviewer <name>`. A lower caught count than
      the last complete batch goes to the owner with the numbers, quoting the n `drill.mjs compare`
@@ -152,7 +160,9 @@ undo.
 
 Use the profile's table exactly, for every agent started (`model` and `effort`). Allowed
 changes, only these: a builder that failed twice hands over to `builder-heavy`; the exceptions
-the profile's table names (for example auth work at `high`). Never below the table.
+the profile's table names (for example auth work at `high`). Never below the table. A doc reviewer
+(section 9) the profile has no row for yet: the class table's row for the profile's risk class
+(`$B/claude/README.md`).
 
 ## 4. Questions: sort before asking
 
@@ -163,6 +173,7 @@ Every would-be question is one of four kinds; only the last stops anything.
 4. An owner choice: only what the profile's "Owner decides" lists, plus always: pushing or
    deploying; a new dependency, service or cost; publishing; an irreversible action on real
    data; a conflict with the requirements; a Tier 3 change still open (section 2).
+   Owner choices from a doc review: only section 9's list.
 
 Then:
 - The profile's "Standing rules" settle questions the owner already answered once; apply them,
@@ -184,7 +195,9 @@ Then:
 3. Tier 1-3: spec in `.agent-runs/<date>-<slug>/spec.md` from the profile's spec template: goal,
    acceptance criteria, the requirement sections it rests on (point, don't copy), pages touched,
    tier. Unclear current-stage details: the conservative reading, under "Assumed". Unclear
-   later-stage details: left out and put to the owner.
+   later-stage details: left out and put to the owner. The doc text a spec rests on is reviewed
+   first where section 9's "When" says so. A number, rule or reading under "Assumed" that the doc it
+   points to does not hold is written into that doc in this task (section 9).
    A new feature or one-off also states its expected gain, in numbers, and a size limit in lines.
    When a measured gain comes in small (a review's "adds 1 of 34") or the limit breaks, stop before
    adding guards, fix rounds or stop tests: the main session compares gain and cost, then drops or
@@ -210,7 +223,8 @@ Then:
    crawler once for the changed pages, when the profile names one.
 6. Review: the tier's reviewers in one message (parallel). Code reviewers get the commit range
    (or the working tree), the spec path and the CHECKS output. UX and trust reviewers get only
-   screenshot paths and one line per page on its purpose, nothing else.
+   screenshot paths and one line per page on its purpose, nothing else. Doc hunks at doc level 1-3
+   add their doc reviewers to this message, with one triage for all (section 9).
 7. Triage: the main session checks a single reviewer's findings against the code itself;
    `triage` with two or more. Fix what is right, take the recommended option on cosmetic asks,
    skip what is wrong; owner choices to the actions file. Fixes in one batch. Re-review only
@@ -238,7 +252,9 @@ Then:
    paragraph with the attribution. Each task's last commit before a planned push adds `Ship-Reviews:`
    the reviewers that ran (Tier 3: `code-reviewer, triage`); with nothing left to fix, an
    `--allow-empty` commit carries it. A Tier 0 change on a code path (comment only, a rename) carries
-   the first two plus `Ship-Tier-Why: <reason>`. When `ops/process-check.json` exists, run
+   the first two plus `Ship-Tier-Why: <reason>`. A task with a doc hunk at doc level 1-3, or one
+   taken as wording only, in any tier, adds `Doc-Level:` and `Doc-Reviews:` (section 9) where
+   `Ship-Reviews:` goes. When `ops/process-check.json` exists, run
    `node ops/process-check.mjs origin/main` at the task's end, so CI is only the backstop (rules:
    the blueprint's `docs/ci.md`).
 9. Log: `.agent-runs/<date>-<slug>/log.md` (tier and why, chunks, gate results, finding counts,
@@ -249,7 +265,7 @@ Then:
    findings aimed at code an earlier fix in the same task added. `escape_of`: when the task fixes a
    bug an earlier review let through, that task's slug, whoever found the bug, the owner included.
    The main session saves each reviewer's report in full as `reports/<reviewer>-<round>.md` in the
-   run folder.
+   run folder. Doc reviews add section 9's rows.
    Update the actions file (section 6).
 10. `summarizer` for long logs, check output, crawl reports or pasted server output.
 
@@ -279,7 +295,9 @@ Read the ledgers, the global view (`node "$T/setup-view.mjs"`, with
 (`node "$T/spend-view.mjs" --since <date>`). When the project has the process check, also
 `node ops/process-check.mjs --audit --reviewed <ledger folder>/process-reviewed.txt` and the
 process runs since the last review
-(`gh run list --workflow Process --limit 100`). Triggers:
+(`gh run list --workflow Process --limit 100`). Doc-only tasks (section 9) count toward neither the
+10 tasks nor the ratios below; the view leaves out their run-ledger rows (no builder), so their
+owner stops are read from the run ledger directly. Triggers:
 - A reviewer over 70% rejected in its last 4 runs (noisy), or with no accepted finding of its
   own in its last 3 (redundant): propose going lighter or dropping it. Not for the challenger
   (section 8), nor `back-check` (section 2, step 7), where finding nothing is the good outcome.
@@ -292,8 +310,17 @@ process runs since the last review
   drills have not measured.
 - From the logs, report how each loop rule that could let more through was used. Each such rule
   joins this list with its edit (section 2, step 7): tasks on the recoverable route, findings parked
-  as no real impact, rounds redesigned for `fix_caused`. Any `escape_of` pointing at one of them:
-  propose removing that rule.
+  as no real impact, rounds redesigned for `fix_caused`; doc hunks taken as `wording only` or kept
+  below level 3 by an exclusion (section 9; `log.md` lists each with its doc, line and
+  reason): count them and look at a sample, and any that changed a number, rule or step is reviewed
+  now; doc questions settled without the owner (section 9's "never" list; `log.md` lists each with
+  its basis): count doc-review owner stops and check a sample of those settled without the owner;
+  `tracked:` and `blocking:` items still open in `doc-reviews.csv` (section 9): count each kind, with
+  the oldest's age.
+  Any `escape_of` pointing at one of them: propose removing that rule.
+- Doc commits since the last review and after adoption, on the profile's doc paths, by task
+  (`Ship-Task`): each task whose last commit before its push has no `Doc-Level:`, and each doc
+  commit with no task, is looked at; a hunk at doc level 1-3 in it is reviewed now (section 9).
 - `--audit` shows an open task: run its missing review. Its `unclaimed` commits have no task to
   close, and closing one would need a history rewrite: look at each `unreviewed` one, then add its
   sha to that file; only `unreviewed` above 0 is open. Log the count of red process runs; none at all
@@ -335,7 +362,10 @@ Drills measure what reviews miss (commands, cases, limits: the blueprint's `docs
 
 ## 8. The challenger (direction, not code)
 
-Runs when the owner asks, and at most once at the start of a stage or phase; never per change. Two
+Runs when the owner asks; at most once at the start of a stage or phase; and in every Tier 3 task
+that adds or replaces a design (a new part of this loop, a new agent, a new subsystem, a new data or
+integrity format), not one that fixes, rehearses or extends an existing design: blind before the plan
+is written, compare once it is drafted, before the plan review. Never per routine change. Two
 steps of one agent: start it with `Step: blind`, the goal and the constraints only (not the current
 design); when it returns, continue the same agent with `Step: compare` and the design to read. The
 main session judges the verdict: what changes direction or a requirement goes to the owner through
@@ -347,3 +377,168 @@ well-argued "stay the course" counts), else 0; `rejected` the rest. Its value is
 noisy and redundant triggers do not apply and time without a run says nothing. After every 6 runs,
 the setup review reports how many of them had `accepted` 1 and the main session's opinion; with none
 in 6 it asks the owner whether to keep it. It is never dropped or lightened without the owner.
+
+## 9. Doc review
+
+Builders, tests and reference implementations are all written from the docs, so a wrong rule in a
+doc passes every test. Doc review checks doc text by its content, apart from tiers: in any work,
+Tier 0 included, every changed doc hunk at doc level 1-3 is reviewed ("When"), from adoption (top
+of this file). A doc is a file on the profile's doc paths ("Doc levels"); a generated file it
+excludes is reviewed through its sources. The doc reviewers are generic; the profile's "Doc levels"
+and "Doc review focus" say what matters in the project.
+
+**Levels** ("doc level 0-3", L0-L3 in logs; never D0-D3, which are stage names). Each changed hunk
+is leveled by its content, and the highest hunk sets the change's level. The profile's floor and
+paths only raise a level, never lower it. Doubt goes up. `log.md` records each hunk's level and the
+criterion that decided it.
+- Level 3: the hunk adds or changes a number (a value something is computed, decided or checked
+  with; not an id, a version or a record's date), formula, definition, threshold, tolerance, default,
+  method, worked example or expected value; a money, tax or legal rule the app applies (not a
+  license notice); an integrity-format or data-check rule; anything code or a reference
+  implementation computes from or tests are written from. In any doc, the requirements, `CLAUDE.md`
+  and the glossary included. A value restated with a pointer to the doc that sets it (`as in <doc>`)
+  is at least level 1, and `doc-reviewer-consistency` checks that it matches that doc exactly;
+  restated without a pointer, it counts in full.
+- Level 2: a rule agents or builders follow; a feature or page described; a contract between parts
+  (an API, a plug-in); the decisions log; restore, rollback, migration and key-handling steps (they
+  are followed only once the harm is done).
+- Level 1: other steps people or agents follow (setup, runbooks, troubleshooting); help text without
+  definitions.
+- Level 0: notes, logs, ledgers, the backlog, run folders, work logs, actions files (they keep
+  `Mode: actions`, section 6); a wording-only hunk (no number, rule, step or meaning changed).
+  Nothing is built from these: a fact code relies on moves to a doc at its level first.
+
+**Reviewers**, one agent each, started in one message (parallel). Each is its own ledger name, so
+section 7's noisy and redundant triggers apply to each.
+
+| Doc level | Agents |
+|---|---|
+| 1 | `doc-reviewer-consistency` |
+| 2 | `doc-reviewer-consistency`, `doc-reviewer-clarity` |
+| 3 | `doc-reviewer-consistency`, `doc-reviewer-source`, `doc-reviewer-examples`, `doc-reviewer-adversarial` |
+
+`doc-reviewer-derive` is on trial: it runs only in doc drills until a drill shows it catches planted
+mistakes the level 3 set misses (then a setup change adds it to level 3 for formula and method
+hunks; otherwise it is dropped). A doc drill never gates anything; it runs once before a project's
+first catch-up when possible, in the session, on a throwaway clone. `builder-heavy` plants about 12
+mistakes in 3-4 of its level 3 docs, replacing the text in the doc, in every restatement and in the
+code and tests built from it (at least 4 wrong but consistent rules with their examples changed to
+match, plus boundary flips and ambiguities), and writes the derive arm's questions; the level 3 set
+and the derive arm run on the clone; `builder-heavy` scores them; the main session reads only the
+counts. The clone lies outside the repo; each drill prompt gives only the clone's absolute path, says
+to read and search nothing outside it, and never says it is a drill.
+
+Doc reviewers get the commit range (or the working tree), the doc paths with each hunk's level, the
+sections in scope, and the spec path inside a task; `doc-reviewer-examples` and
+`doc-reviewer-clarity` get `git diff <range> -- <doc paths>` instead of the range, which may hold
+code. The scope is the changed hunks and the sections they touch; a doc without headings is in scope
+whole; in an append-only log (the decisions log), only its new entries, and a past entry found wrong
+is corrected by a new entry, never edited. Each reviewer reads the whole doc as context, and a
+finding is in scope when either side of it touches the scope. Two or more ran: `triage` with
+`Mode: docs`; one: the main session checks its findings against the docs itself. A hunk that triage
+(or that one reviewer) puts at a higher level gets that level's missing agents before the review
+counts. A run's scope holds at most about 4,000 words: a larger one is split by sections into parts,
+each reviewed on its own, and a doc split this way then gets one whole-doc
+`doc-reviewer-consistency` run. A run that hits its finding limit may have stopped short: after the
+fixes it reruns on the same scope. A part where a run hits a limit twice is split again; a part that
+cannot be split counts as reviewed once a rerun after fixes stays under every limit; still at a
+limit after the second fix round, its unfixed findings become blocking open items. Models and
+efforts: section 3.
+
+**When.**
+- Doc-only work is its own task: a run folder and `log.md`; its commits carry `Ship-Task: <slug>`
+  and `Ship-Tier: 0`. A task's doc hunks are reviewed together once, however many commits carry
+  them: before push, and before the first commit carrying text a builder in the task builds from.
+- Inside a Tier 1-3 task, doc hunks join step 6's batch, one triage for all.
+- Before building (section 5, step 3): text at doc level 2-3 the spec rests on that changed after
+  adoption, and every level 3 section the spec computes from, must be reviewed (below).
+  Not reviewed: changed text is reviewed first (or in the batch, when this task writes it); for an
+  older level 3 section, its doc's catch-up task moves to the front. A blocking item open: the task
+  waits on it and goes on with everything else (section 4). A tracked one: it builds on the
+  conservative reading the doc records.
+- Reviewed-docs record: `doc-reviews.csv` in the ledger folder, one row per doc reviewed, written
+  after the commit carrying the reviewed text: `date,path,sha,level,modes,scope,open`. `sha`: that
+  commit, in the repo that holds the doc (a submodule's own commit for a doc inside it); `modes`: the agents that ran; `scope`: `whole`, or heading slugs (as GitHub makes them)
+  separated by `;`; `open`: the items left, separated by `;`, else empty. `scope` and `open` are
+  always quoted. A section is reviewed when a row at its level or higher covers it with nothing
+  blocking open and no later commit changed it without a row of its own; once an open item is
+  settled, a new row for that scope closes it. A doc is reviewed when all its sections are.
+- Open items, each prefixed in `open`: `blocking:` (an owner item 1-4 below, readings not yet
+  computed, a finding still unfixed after the last fix round) or `tracked:` (a level 3 claim whose
+  source was not read, a reference check only the owner can run). A tracked item takes the
+  conservative reading (by the profile's domain checklist and worst failure), written into the doc
+  as assumed. A task's tracked items become one action step (item 5 below: the owner checks them,
+  or puts a copy of the source in `private/`), and its report lists them under Open issues. A
+  tracked check that later disagrees: the doc is fixed, and the code built from it becomes a code
+  task with `escape_of` (section 5, step 9).
+- Catch-up (text from before adoption): one task per doc, or per group of small related docs, scope
+  `whole`, in parts as above. Order: docs that code or the reference implementation computes from,
+  then other level 3 docs, then level 2. Slugs start `doc-catchup-`,
+  and each log keeps the running count of agent runs; past about 300 runs per project the catch-up
+  goes on, and each task's report gives the count under Open issues. Findings about code already
+  built from the old text become code tasks at their usual tiers.
+
+**Sources.** For each `read:` URL that an accepted finding, or a `Checked:` line confirming a level
+3 claim, rests on, the main session searches the page's raw text for the quote; no model reads the
+page again. It fetches with `curl` (declaring the host in the call's `allowed_domains` where the
+sandbox needs it), turns a PDF into text with `pdftotext` when installed, removes HTML tags, and in
+page and quote decodes HTML entities, applies Unicode NFKC, maps curly quotes and dashes to ASCII,
+joins words hyphenated across line breaks and collapses whitespace, then runs a fixed-string `grep`; it reads only found or not
+found. A page it cannot fetch or turn into text, or a quote not found, counts as not read; a quote
+not found on a fetched page is also logged as that reviewer's fault. A level 3 claim in scope that the source reviewer's `Checked:` omits counts as not read. A level 3 claim left not read
+is never confirmed; it is tracked (When). A `doc-reviewer-source` run that read nothing counts as
+not run, so its claims are tracked, and the blueprint's global actions file gets an item with the
+cause (section 1). A task's `No outside example:` lines (from `doc-reviewer-examples`) go into
+`log.md`; those a reference tool only the owner runs could give a value for join the task's action
+step (item 5 below), the rest go to the project's to-do list.
+
+**Fixes.** The main session edits the docs. Every doc hunk changed after the batch, fixes included
+(by a doc or code fix round, or the text the compute step writes), is leveled again by its content;
+at level 1-3 its changed lines are re-reviewed by the agent that found it, if any, plus its new
+level's full set. At most 2 fix rounds. Still open, or the reviewers disagree on what is right:
+`builder-heavy` (Tier 3 row) computes both readings on synthetic cases in the run folder, and in the
+reference tool the profile names when the session can run it. The reading that matches the reference
+tool, or else the conservative one (by the profile's domain checklist and worst failure), is taken
+and recorded as assumed. A reference tool the session cannot run: the conservative reading is taken
+and the check is tracked (When). A finding still unfixed after that, on text from the last fix round
+or the compute step, is open as blocking; there is no third round: the next doc task on that scope
+takes it with its own two rounds (not trigger e). A difference reaches the owner
+only through the list below, stated as its effect in user terms (for example "Sharpe 0.82 against
+0.79 on the sample"), never as math.
+
+**The owner decides only:**
+1. A finding that would change what a requirement asks for (a feature, a target, behavior users
+   see), or a doc that contradicts the requirements where no source decides which is right. A
+   correction that makes a requirement match its source, the reference tool, or another requirement
+   that a dated decisions-log entry, the current stage file or an owner answer names as the current
+   side, is a doc fix, with a decisions-log entry and one line per doc in the actions file's work
+   log (section F; information, no action). Two requirements with nothing naming the current side:
+   this item.
+2. A choice on the profile's "Owner decides" list that nothing settles (a source, a standing rule
+   such as "as the reference tool does", an earlier answer). Where a list entry names what settles
+   it ("tax rules the owner's cases do not settle"), that entry wins over the "never" list below.
+3. An approval the project's rules require (a pre-registration, a formula before validation,
+   targets), and any change to something the owner approved or that was registered.
+4. A difference left after the Fixes step that changes a number the user sees and is on the
+   profile's list.
+5. An external check only the owner can run (a golden value from a tool behind their account, a
+   source the session could not read): an action step (section 6), not a decision.
+
+Never the owner otherwise: whether a rule or formula is right, a convention with a standard or a
+read source, wording (except an instruction users act on, such as an alert telling them to trade,
+when the profile's list covers what it is about), consistency, an edge case with a conservative
+handling (taken and recorded as assumed). Docs keep records of settled decisions and hold no open
+owner questions; those go to the actions file. Each assumption states its basis:
+`source: <citation>`, `reference tool: <doc>`, `owner: <date>` or `choice: <reason>`.
+
+**Records.**
+- Trailers, in the paragraph with the attribution, where `Ship-Reviews:` goes (section 5, step 8):
+  `Doc-Level: <0-3>` (the task's highest level; 0 when every hunk that would need review was taken
+  as wording only) and `Doc-Reviews: <agents that ran, and triage if it ran>`, adding
+  `wording only` when a hunk was taken as such.
+- One agent-ledger row per agent run, reviewer the agent's name, `tier` 0 for doc-only work, else
+  the task's tier. A doc-only task also gets a run-ledger row at tier 0, with its `owner_stops`. One
+  `doc-reviews.csv` row per doc reviewed.
+- `log.md`: each hunk's level and its criterion (naming any exclusion that kept it below level 3),
+  every `not read` source and quote not found, each hunk taken as wording only with its doc and
+  line, and each question settled without the owner with its basis.

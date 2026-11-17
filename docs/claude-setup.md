@@ -24,8 +24,8 @@ private; otherwise it is public.
 Shared agents (this repo's `claude/`), one profile per project (`docs/agents.md`, template in
 `templates/docs/agents.md`). The profile says what the app is and its worst failure, the rules
 files, the trust territory, the domain checklist, what the owner decides, where texts go, the
-CHECKS command, the model and effort per role, which reviews are used, and the paths of the
-spec template, run logs, ledger and actions file. Why and how to choose models:
+CHECKS command, the model and effort per role, which reviews are used, its doc levels and doc
+review focus, and the paths of the spec template, run logs, ledger and actions file. Why and how to choose models:
 [claude/README.md](../claude/README.md).
 
 ## The loop (`/ship <task>`)
@@ -49,6 +49,13 @@ session loads it only when it does agent work. It holds:
 - **The loop steps**: spec, build, gates, review, triage, commit by name with trailers, logs.
 - **Writing for the owner**: each actions item 5-20 lines, enough to decide on alone; command steps
   rehearsed on a throwaway copy or marked `Not rehearsed: <why>`.
+- **Doc review**, apart from tiers, in a project whose `CLAUDE.md` points to it: in any work, Tier 0
+  included, each changed doc hunk gets a doc level 0-3 by its content (a number, formula or rule
+  that code or tests are written from is level 3), and levels 1-3 get one to four generic doc
+  reviewers with different jobs before anything is built from them or pushed (consistency; clarity;
+  outside sources; recomputed numbers; edge cases). Text from before adoption is caught up doc by
+  doc, about 300 agent runs per project at most before it is reported. The profile names its doc
+  paths, floor and focus; the owner decides only what a short closed list names.
 - **The setup review** every 10 tasks or every month: fixed triggers on the ledgers, the global
   view, the process audit, a batch of drills only if the setup changed; proposals with their numbers
   to the owner, changes
@@ -72,6 +79,11 @@ has its own file (below).
 - `drill-ledger.csv`: one row per case run, appended only by the runner,
   `date,case,kind,reviewer,model,effort,tier,planted,caught,other_findings,batch,batch_cases,agent_text,malformed,context_text,case_hash`.
 - `drills/<id>/`: the drill cases and their keys, never public.
+- `doc-reviews.csv`: one row per doc reviewed, written after the commit carrying the reviewed text,
+  `date,path,sha,level,modes,scope,open` (`sha`: that commit; `scope`: `whole` or heading slugs
+  separated by `;`; `open`: what is left unsettled, each item `blocking:` or `tracked:`; both always
+  quoted). A section no row covers, or covered only with something blocking open, is unreviewed
+  (`/ship` section 9).
 - `process-reviewed.txt`: one sha per line, commits the process audit lists that a session has looked
   at. A session adds a sha only after looking at that commit.
 
@@ -147,7 +159,8 @@ counts.
 
 Only `code-reviewer` and `code-reviewer-light` have cases. `ux-reviewer`, `trust-reviewer`, `triage`
 and `challenger` give no `file:line` answer to score, and adversarial mode shares `code-reviewer`'s
-text.
+text. The doc reviewers have no cases yet: until `drill.mjs` supports docs, a doc drill runs in a
+session (`/ship` section 9).
 
 The commands, with `T=$(readlink -f ~/.claude/commands)/../../tools`:
 

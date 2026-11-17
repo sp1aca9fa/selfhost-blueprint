@@ -1,6 +1,6 @@
 ---
 name: challenger
-description: Independent second opinion on direction - is this the right approach, is there a better or very different route. Proposes alternatives before seeing the current design, then compares. Read-only; only when the owner asks or at the start of a stage, never per change.
+description: Independent second opinion on direction - is this the right approach, is there a better or very different route. Proposes alternatives before seeing the current design, then compares. Read-only; when the owner asks, at the start of a stage or phase, or in a Tier 3 task that adds or replaces a design; never per routine change.
 model: opus
 effort: high
 tools: Read, Glob, Grep, WebSearch, WebFetch

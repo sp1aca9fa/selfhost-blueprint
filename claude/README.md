@@ -13,7 +13,7 @@ the loop and its lessons (for example: restore probes with `git checkout`, never
 project changes only its profile.
 
 Context cost: every session, in every project, loads only each agent's one-line description
-(about 450 tokens for all nine). An agent's body loads only when it runs. A project that does not
+(about 700 tokens for all fifteen). An agent's body loads only when it runs. A project that does not
 use the loop has no `docs/agents.md`; `/ship` then stops at once.
 
 A project's own `.claude/agents/<name>.md` overrides the shared agent of the same name. Use that
@@ -37,8 +37,14 @@ and `effort` when it starts an agent, and never goes below them.
 | ux-reviewer | Sonnet, medium | visible changes, from screenshots only |
 | trust-reviewer | Sonnet, medium | visible changes showing numbers, money or risk (projects that need it) |
 | triage | Opus, medium | merging two or more reviewers' findings |
-| challenger | Opus, high | a second opinion on direction, on request or at a stage's start (`commands/ship.md` section 8) |
+| challenger | Opus, high | a second opinion on direction, on request, at a stage's start or for a new design in Tier 3 (`commands/ship.md` section 8) |
 | summarizer | Haiku, low | long logs, check or crawl output, pasted server output |
+| doc-reviewer-consistency | Opus, high | doc level 1-3: contradictions with the requirements, other docs, rules and code (`commands/ship.md` section 9) |
+| doc-reviewer-clarity | Sonnet, high | doc level 2: where two builders would build it differently, from the text alone |
+| doc-reviewer-source | Opus, high | doc level 3: claims against outside authorities, each with a quoted line or `not read`; web tools, as derive has |
+| doc-reviewer-examples | Opus, xhigh | doc level 3: recomputes stated numbers and typical cases from the doc alone |
+| doc-reviewer-adversarial | Opus, xhigh | doc level 3: edge inputs and readings every test written from the doc would pass |
+| doc-reviewer-derive | Sonnet, high | on trial, doc drills only: derives a rule blind from the question a section answers |
 
 The orchestrator is the main session, not an agent: Opus at high effort (the owner picks it). It
 holds the context, writes specs, judges findings and talks to the owner; a weaker model there
@@ -67,6 +73,12 @@ table. Only the setup review (`commands/ship.md` section 7) changes it, with the
 | triage | Opus medium | Opus medium | Sonnet medium |
 | challenger | Opus high | Opus high | Sonnet high |
 | summarizer | Haiku low | Haiku low | Haiku low |
+| doc-reviewer-consistency | Opus high | Opus medium | Sonnet high |
+| doc-reviewer-clarity | Sonnet high | Sonnet medium | Sonnet medium |
+| doc-reviewer-source | Opus high | Opus high | Sonnet high |
+| doc-reviewer-examples | Opus xhigh | Opus high | Opus high |
+| doc-reviewer-adversarial | Opus xhigh | Opus high | Opus high |
+| doc-reviewer-derive | Sonnet high | Sonnet high | Sonnet high |
 
 Why:
 - Opus where correctness depends on reasoning across files; Sonnet for contained work.
@@ -81,3 +93,18 @@ Why:
 - The challenger does not follow the class's code-reviewer in class B: a wrong direction is not
   recomputed away, and it runs rarely, so `high` costs little. `xhigh` adds little here: it needs
   range, not checking.
+- Doc reviewers: code and tests are written from the docs, so a wrong rule passes every test. Six
+  agents, not one with modes: their tools differ (only the source reviewer and the on-trial derive
+  reviewer get web tools), and each has its own ledger rows, so overlap between them shows up in the
+  noisy and redundant triggers.
+- `doc-reviewer-consistency` follows the class's code-reviewer row: it reads across files the same
+  way.
+- `doc-reviewer-clarity` is on Sonnet in every class, on purpose: most docs are written by Opus
+  sessions, and a different model reads the text more like a different builder would. It never
+  reads code. `doc-reviewer-derive`, on trial, is on Sonnet high in every class for the same reason,
+  so a drill's result does not depend on the class.
+- `doc-reviewer-examples` and `doc-reviewer-adversarial` stay on Opus in every class: recomputing
+  numbers and finding the reading every test passes is reasoning, a miss is silent in any class,
+  and they run only at doc level 3. `xhigh` in class A, as for Tier 3 code.
+- `doc-reviewer-source` at `high`, not `xhigh`, in A and B: it needs careful reading and quoting,
+  not depth. Its web queries carry only the name of a paper, standard or term.
